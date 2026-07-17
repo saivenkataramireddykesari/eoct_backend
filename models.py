@@ -68,7 +68,9 @@ class Product(Base):
     pack_size = Column(String(50))
     standard_batch_size = Column(Integer)
     moq = Column(Integer)
-    pm_code = Column(String(50))
+    primary_pm_code = Column(String(255))
+    secondary_pm_code = Column(String(50))
+    leaf_pm_code = Column(String(50))
     current_artwork_version = Column(String(20))
     artwork_status = Column(String(50), default="Not Available")  # Available, Pending, Not Available
     is_active = Column(Boolean, default=True)
@@ -223,17 +225,22 @@ class Alert(Base):
 
 class PMCodeRequest(Base):
     __tablename__ = "pm_code_requests"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     product_sku = Column(String(50), ForeignKey("products.sku_code"), nullable=False)
-    status = Column(String(50), default="PENDING_ARTWORK")  # PENDING_ARTWORK, AWAITING_REGULATORY_APPROVAL, APPROVED, REJECTED
-    current_pm_code = Column(String(50))
+    status = Column(String(50), default="PENDING_ARTWORK")
+
+    current_primary_pm_code = Column(String(50))
+    current_secondary_pm_code = Column(String(50))
+    current_leaf_pm_code = Column(String(50))
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     product = relationship("Product", back_populates="pm_code_requests")
     transactions = relationship("PMCodeTransaction", back_populates="request", cascade="all, delete-orphan")
 
+    
 class PMCodeTransaction(Base):
     __tablename__ = "pm_code_transactions"
     
@@ -243,7 +250,9 @@ class PMCodeTransaction(Base):
     to_state = Column(String(50))
     action_by_dept = Column(String(50))  # Regulatory, Artwork
     action_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    pm_code = Column(String(50))
+    primary_pm_code = Column(String(50))
+    secondary_pm_code = Column(String(50))
+    leaf_pm_code = Column(String(50))
     remarks = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     response_time_days = Column(Float, default=0.0)

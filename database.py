@@ -1,17 +1,32 @@
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+import os
 
-# MySQL database connection
-# Format: mysql+pymysql://username:password@host:port/database
-SQLALCHEMY_DATABASE_URL = "mysql+pymysql://root:root@localhost:3306/eoct"
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+SSL_CA = os.getenv("MYSQL_SSL_CA")
 
 engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, pool_pre_ping=True
+    DATABASE_URL,
+    pool_pre_ping=True,
+    connect_args={
+        "ssl": {
+            "ca": SSL_CA
+        }
+    }
 )
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine
+)
 
 Base = declarative_base()
+
 
 def get_db():
     db = SessionLocal()

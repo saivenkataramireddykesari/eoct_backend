@@ -40,7 +40,9 @@ class PMCodeTransactionResponse(BaseModel):
     to_state: Optional[str]
     action_by_dept: Optional[str]
     action_by_user_id: int
-    pm_code: Optional[str]
+    primary_pm_code: Optional[str]
+    secondary_pm_code: Optional[str]
+    leaf_pm_code: Optional[str]
     remarks: Optional[str]
     created_at: datetime
     response_time_days: float
@@ -52,7 +54,9 @@ class PMCodeRequestResponse(BaseModel):
     id: int
     product_sku: str
     status: str
-    current_pm_code: Optional[str]
+    current_primary_pm_code: Optional[str]
+    current_secondary_pm_code: Optional[str]
+    current_leaf_pm_code: Optional[str]
     created_at: datetime
     updated_at: datetime
     transactions: List[PMCodeTransactionResponse] = []
@@ -64,7 +68,9 @@ class PMCodeRequestCreate(BaseModel):
     product_sku: str
 
 class PMCodeSubmit(BaseModel):
-    pm_code: str
+    primary_pm_code: str
+    secondary_pm_code: str
+    leaf_pm_code: str
     remarks: Optional[str] = None
 
 class PMCodeDecision(BaseModel):
@@ -81,7 +87,9 @@ class ProductBase(BaseModel):
     pack_size: Optional[str] = None
     standard_batch_size: Optional[int] = None
     moq: Optional[int] = None
-    pm_code: Optional[str] = None
+    primary_pm_code: Optional[str] = None
+    secondary_pm_code: Optional[str] = None
+    leaf_pm_code: Optional[str] = None
     current_artwork_version: Optional[str] = None
     artwork_status: str = "Not Available"
 
@@ -94,6 +102,20 @@ class ProductResponse(ProductBase):
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
     pm_code_requests: List[PMCodeRequestResponse] = []
+
+    class Config:
+        from_attributes = True
+
+class SkuItem(BaseModel):
+    sku_code: str
+    product_name: str
+
+    class Config:
+        from_attributes = True
+
+class SkuItem(BaseModel):
+    sku_code: str
+    product_name: str
 
     class Config:
         from_attributes = True
@@ -310,6 +332,9 @@ class DashboardData(BaseModel):
     recent_orders: List[OrderResponse]
     alerts: List[AlertResponse]
 
+    class Config:
+        from_attributes = True
+
 class CanApproveResponse(BaseModel):
     can_approve: bool
     is_scm_override: bool
@@ -324,5 +349,8 @@ class ComplianceCheckResult(BaseModel):
     status: str
     remarks: str
     issues: List[str]
+
+class CountryListResponse(BaseModel):
+    countries: List[str]
 
 
