@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.DEBUG)
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # React frontend
+    allow_origins=["http://localhost:3000","https://exportordercontroltower.netlify.app",],  # React frontend
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
