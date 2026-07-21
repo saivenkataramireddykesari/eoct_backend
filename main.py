@@ -9,7 +9,7 @@ import os
 import shutil
 import logging
 
-from sqlalchemy.orm import relationship, joinedload # Added joinedload
+from sqlalchemy.orm import relationship, joinedload, selectinload
 import models
 import schemas
 import auth
@@ -126,15 +126,19 @@ def create_user(
 @app.get("/api/products", response_model=List[schemas.ProductResponse])
 def get_products(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 20,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    query = db.query(models.Product).options(
+        selectinload(models.Product.pm_code_requests).selectinload(models.PMCodeRequest.transactions)
+    )
     if current_user.department == "Artwork":
-        products = db.query(models.Product).join(models.PMCodeRequest).distinct().offset(skip).limit(limit).all()
+        products = query.join(models.PMCodeRequest).distinct().offset(skip).limit(limit).all()
     else:
-        products = db.query(models.Product).offset(skip).limit(limit).all()
+        products = query.offset(skip).limit(limit).all()
     return products
+
 
 @app.post("/api/products", response_model=schemas.ProductResponse)
 def create_product(
@@ -435,16 +439,17 @@ def decide_pm_code(
 @app.get("/api/registrations", response_model=List[schemas.RegistrationResponse])
 def get_registrations(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 20,
     country: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    query = db.query(models.Registration)
+    query = db.query(models.Registration).options(joinedload(models.Registration.product))
     if country:
         query = query.filter(models.Registration.country == country)
     registrations = query.offset(skip).limit(limit).all()
     return registrations
+
 
 @app.get("/api/countries", response_model=schemas.CountryListResponse)
 def get_countries(
@@ -470,11 +475,38 @@ def create_registration(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    # Check for duplicate: same country + SKU + registration_number
+    existing = db.query(models.Registration).filter(
+        models.Registration.country == registration.country,
+        models.Registration.sku == registration.sku,
+        models.Registration.registration_number == registration.registration_number
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This registration already exists for the selected country and SKU."
+        )
+
     db_registration = models.Registration(**registration.dict())
     db.add(db_registration)
     db.commit()
     db.refresh(db_registration)
     return db_registration
+
+@app.get("/api/registrations/by-sku", response_model=List[schemas.RegistrationResponse])
+def get_registrations_by_sku(
+    sku: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Return all registrations for a given SKU code so frontend can populate registration number dropdown."""
+    registrations = (
+        db.query(models.Registration)
+        .filter(models.Registration.sku == sku)
+        .order_by(models.Registration.country)
+        .all()
+    )
+    return registrations
 
 @app.get("/api/debug/registrations", response_model=List[schemas.RegistrationResponse])
 def debug_registrations(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -512,11 +544,12 @@ def upload_registration_certificate(
 @app.get("/api/customers", response_model=List[schemas.CustomerResponse])
 def get_customers(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 20,
     country: Optional[str] = None, # Added optional country filter
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+
     query = db.query(models.Customer)
     if country:
         query = query.filter(models.Customer.country == country)
@@ -541,23 +574,27 @@ def get_products_for_customer(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Return products that have an active registration for the given customer's country."""
+    """Return products for the given customer's country and customer name."""
     customer = db.query(models.Customer).filter(models.Customer.id == customer_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    registered_skus = db.query(models.Registration.sku).filter(
-        models.Registration.country == customer.country,
-        models.Registration.registration_status == "Active"
-    ).distinct().all()
-    sku_list = [r.sku for r in registered_skus]
-    if not sku_list:
-        return []
+    # Fetch products that match the customer's country and customer name
     products = db.query(models.Product).filter(
-        models.Product.sku_code.in_(sku_list),
+        models.Product.country == customer.country,
+        models.Product.customer == customer.customer_name,
         models.Product.is_active == True
     ).all()
+    
+    # Fallback to country matching products if no customer-specific products are found
+    if not products:
+        products = db.query(models.Product).filter(
+            models.Product.country == customer.country,
+            models.Product.is_active == True
+        ).all()
+        
     return products
+
 
 @app.get("/api/customers/{customer_id}", response_model=schemas.CustomerResponse)
 def get_customer(
@@ -568,7 +605,9 @@ def get_customer(
     customer = db.query(models.Customer).filter(models.Customer.id == customer_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
+
     return customer
+
 
 
 # ==================== ORDER MANAGEMENT ====================
@@ -721,12 +760,18 @@ def get_user_approval_department(
 @app.get("/api/orders", response_model=List[schemas.OrderResponse])
 def get_orders(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 20,
     status: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    query = db.query(models.Order)
+    query = db.query(models.Order).options(
+        joinedload(models.Order.customer),
+        joinedload(models.Order.product),
+        selectinload(models.Order.approvals).joinedload(models.OrderApproval.approver),
+        selectinload(models.Order.milestones),
+        selectinload(models.Order.alerts)
+    )
 
     # Filter for Artwork department: only show orders that are pending artwork process
     if current_user.department == "Artwork":
@@ -737,6 +782,7 @@ def get_orders(
 
     orders = query.order_by(models.Order.created_at.desc()).offset(skip).limit(limit).all()
     return orders
+
 
 @app.post("/api/orders", response_model=schemas.OrderResponse)
 def create_order(
@@ -763,6 +809,24 @@ def create_order(
     order_number = f"{country_prefix}-{customer_prefix}-{current_time.strftime('%m%Y')}"
     
     order_data = order.dict()
+    # If PO number is provided, append count
+    if order.po_number:
+        base_po_number = order.po_number  # Assuming po_number comes in as "MYA-LOY-07/26"
+        
+        import re
+        if re.search(r'-\d+$', base_po_number):
+            # It already has the serial suffix (e.g. -1), keep it as is
+            order_data['po_number'] = base_po_number
+        else:
+            # Count existing orders with the same base PO number
+            existing_orders_count = db.query(models.Order).filter(models.Order.po_number.like(f"{base_po_number}-%")).count()
+            
+            # Increment count for the new order
+            new_po_number = f"{base_po_number}-{existing_orders_count + 1}"
+            order_data['po_number'] = new_po_number
+
+        
+    print(f"Original PO number from frontend: {order_data.get('po_number')}")
     order_data['order_number'] = order_number
     # Auto-compute total quantity from sales + free
     order_data['quantity'] = order_data.get('sales_quantity', 0) + order_data.get('free_quantity', 0)
@@ -831,10 +895,17 @@ def get_order(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    order = db.query(models.Order).options(
+        joinedload(models.Order.customer),
+        joinedload(models.Order.product),
+        selectinload(models.Order.approvals).joinedload(models.OrderApproval.approver),
+        selectinload(models.Order.milestones),
+        selectinload(models.Order.alerts)
+    ).filter(models.Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     return order
+
 
 @app.put("/api/orders/{order_id}", response_model=schemas.OrderResponse)
 def update_order(
@@ -1493,15 +1564,17 @@ def mark_alert_read(
 @app.get("/api/audit-logs", response_model=List[schemas.AuditLogResponse])
 def get_audit_logs(
     order_id: Optional[int] = None,
-    limit: int = 100,
+    skip: int = 0,
+    limit: int = 20,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    query = db.query(models.AuditLog)
+    query = db.query(models.AuditLog).options(joinedload(models.AuditLog.user))
     if order_id:
         query = query.filter(models.AuditLog.order_id == order_id)
-    logs = query.order_by(models.AuditLog.timestamp.desc()).limit(limit).all()
+    logs = query.order_by(models.AuditLog.timestamp.desc()).offset(skip).limit(limit).all()
     return logs
+
 
 # ==================== DASHBOARD ====================
 
@@ -1580,7 +1653,11 @@ def get_dashboard(
         ).count()
     
     # Recent orders
-    recent_orders = db.query(models.Order).order_by(models.Order.created_at.desc()).limit(10).all()
+    recent_orders = db.query(models.Order).options(
+        joinedload(models.Order.customer),
+        joinedload(models.Order.product)
+    ).order_by(models.Order.created_at.desc()).limit(10).all()
+
     
     # Unread alerts
     alerts = db.query(models.Alert).filter(
@@ -1598,4 +1675,4 @@ def get_dashboard(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, timeout_keep_alive=600, log_level="debug")

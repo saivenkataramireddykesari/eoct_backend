@@ -17,8 +17,8 @@ class UserCreate(UserBase):
 
 class UserResponse(UserBase):
     id: int
-    created_at: Optional[datetime]
-    last_login: Optional[datetime]
+    created_at: Optional[datetime] = None
+    last_login: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -99,8 +99,8 @@ class ProductCreate(ProductBase):
 class ProductResponse(ProductBase):
     id: int
     is_active: bool
-    created_at: Optional[datetime]
-    updated_at: Optional[datetime]
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     pm_code_requests: List[PMCodeRequestResponse] = []
 
     class Config:
@@ -135,10 +135,10 @@ class RegistrationCreate(RegistrationBase):
 
 class RegistrationResponse(RegistrationBase):
     id: int
-    certificate_path: Optional[str]
+    certificate_path: Optional[str] = None
     is_active: bool
-    created_at: Optional[datetime]
-    updated_at: Optional[datetime]
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -157,11 +157,16 @@ class CustomerCreate(CustomerBase):
 class CustomerResponse(CustomerBase):
     id: int
     is_active: bool
-    created_at: Optional[datetime]
-    updated_at: Optional[datetime]
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    order_type: Optional[str] = None # New field for auto-selection
+    default_artwork_status: Optional[str] = None # New field for auto-selection
+    order_count: Optional[int] = None
+    category: Optional[str] = None
 
     class Config:
         from_attributes = True
+
 
 # Milestone Schemas
 class MilestoneBase(BaseModel):
@@ -178,8 +183,8 @@ class MilestoneCreate(MilestoneBase):
 class MilestoneResponse(MilestoneBase):
     id: int
     order_id: int
-    created_at: Optional[datetime]
-    updated_at: Optional[datetime]
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -202,10 +207,10 @@ class OrderApprovalCreate(OrderApprovalBase):
 class OrderApprovalResponse(OrderApprovalBase):
     id: int
     order_id: int
-    approver_id: Optional[int]
-    approved_at: Optional[datetime]
-    created_at: Optional[datetime]
-    approver: Optional[UserResponse]
+    approver_id: Optional[int] = None
+    approved_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    approver: Optional[UserResponse] = None
 
     class Config:
         from_attributes = True
@@ -230,10 +235,10 @@ class AlertCreate(AlertBase):
 
 class AlertResponse(AlertBase):
     id: int
-    order_id: Optional[int]
+    order_id: Optional[int] = None
     is_read: bool
-    created_at: Optional[datetime]
-    resolved_at: Optional[datetime]
+    created_at: Optional[datetime] = None
+    resolved_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -285,18 +290,18 @@ class OrderResponse(OrderBase):
     id: int
     order_id: str
     status: str
-    compliance_status: Optional[str]
-    compliance_remarks: Optional[str]
-    tentative_production_date: Optional[date]
-    tentative_release_date: Optional[date]
-    created_at: Optional[datetime]
-    updated_at: Optional[datetime]
-    accepted_at: Optional[datetime]
-    shipped_at: Optional[datetime]
-    delivered_at: Optional[datetime]
+    compliance_status: Optional[str] = None
+    compliance_remarks: Optional[str] = None
+    tentative_production_date: Optional[date] = None
+    tentative_release_date: Optional[date] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    accepted_at: Optional[datetime] = None
+    shipped_at: Optional[datetime] = None
+    delivered_at: Optional[datetime] = None
     
-    customer: Optional[CustomerResponse]
-    product: Optional[ProductResponse]
+    customer: Optional[CustomerResponse] = None
+    product: Optional[ProductResponse] = None
     approvals: List[OrderApprovalResponse] = []
     milestones: List[MilestoneResponse] = []
     alerts: List[AlertResponse] = []

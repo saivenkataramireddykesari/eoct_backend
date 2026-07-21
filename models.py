@@ -114,6 +114,36 @@ class Customer(Base):
     
     orders = relationship("Order", back_populates="customer")
 
+    @property
+    def order_type(self):
+        if self.customer_name and self.customer_name.startswith('P'):
+            return "PP"
+        return "PNS"
+
+    @property
+    def default_artwork_status(self):
+        return "Available" if self.agreement_status == "Active" else "Not Available"
+
+    @property
+    def order_count(self):
+        from sqlalchemy.orm import object_session
+        session = object_session(self)
+        if session:
+            return session.query(Order).filter(Order.customer_id == self.id).count()
+        return len(self.orders)
+
+    @property
+    def category(self):
+        name_upper = self.customer_name.upper() if self.customer_name else ""
+        if any(kw in name_upper for kw in ["PHARMA", "MED", "CLINIC", "HOSPITAL", "DRUG"]):
+            return "Drug"
+        elif any(kw in name_upper for kw in ["NUTRA", "NUTRITION", "HEALTH", "BIO", "VITA"]):
+            return "Nutra"
+        elif any(kw in name_upper for kw in ["LAB", "CHEMICAL", "EXCIPIENT", "INGREDIENT"]):
+            return "Excipient"
+        return "Drug"
+
+
 class Order(Base):
     __tablename__ = "orders"
     
