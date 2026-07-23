@@ -13,7 +13,7 @@ from sqlalchemy.orm import relationship, joinedload, selectinload
 import models
 import schemas
 import auth
-from database import engine, get_db
+from database import engine, get_db, SessionLocal
 from auth import get_current_user, authenticate_user, create_access_token, get_password_hash
 from schemas import CanApproveResponse, CountryListResponse # Added CanApproveResponse, CountryListResponse
 
@@ -27,6 +27,22 @@ app = FastAPI(
 )
 
 logging.basicConfig(level=logging.DEBUG)
+
+@app.on_event("startup")
+def update_existing_milestone_names():
+    db = SessionLocal()
+    try:
+        updated_count = db.query(models.Milestone).filter(
+            models.Milestone.name == "PM Procurement Released"
+        ).update({"name": "PO Released"}, synchronize_session=False)
+        if updated_count > 0:
+            db.commit()
+            logging.info(f"Updated {updated_count} existing milestone(s) from 'PM Procurement Released' to 'PO Released'.")
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Error updating milestone names on startup: {e}")
+    finally:
+        db.close()
 
 # CORS middleware
 app.add_middleware(
@@ -133,10 +149,7 @@ def get_products(
     query = db.query(models.Product).options(
         selectinload(models.Product.pm_code_requests).selectinload(models.PMCodeRequest.transactions)
     )
-    if current_user.department == "Artwork":
-        products = query.join(models.PMCodeRequest).distinct().offset(skip).limit(limit).all()
-    else:
-        products = query.offset(skip).limit(limit).all()
+    products = query.offset(skip).limit(limit).all()
     return products
 
 
@@ -243,11 +256,11 @@ def update_product_pm_code(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Allow Regulatory department to update PM code when artwork is not Available."""
-    if current_user.department not in ["Regulatory", "Management"]:
+    """Allow Regulatory, Artwork, and Management departments to update PM code."""
+    if current_user.department not in ["Regulatory", "Management", "Artwork"]:
         raise HTTPException(
             status_code=403,
-            detail="Only Regulatory can update PM code"
+            detail="Only Regulatory, Artwork, or Management can update PM code"
         )
     product = db.query(models.Product).filter(models.Product.sku_code == sku).first()
     if not product:
@@ -258,6 +271,7 @@ def update_product_pm_code(
     db.commit()
     db.refresh(product)
     return product
+
 
 @app.get("/api/products/pm-requests", response_model=List[schemas.PMCodeRequestResponse])
 def get_pm_requests(
@@ -280,11 +294,10 @@ def create_pm_request(
         raise HTTPException(status_code=403, detail="Only Regulatory department can request PM Code")
     
     request = db.query(models.PMCodeRequest).filter(
-        models.PMCodeRequest.product_sku == sku,
-        models.PMCodeRequest.status != "APPROVED"
-    ).first()
+        models.PMCodeRequest.product_sku == sku
+    ).order_by(models.PMCodeRequest.created_at.desc()).first()
     
-    if not request:
+    if not request or request.status == "APPROVED":
         request = models.PMCodeRequest(
             product_sku=sku,
             status="PENDING_ARTWORK",
@@ -305,19 +318,18 @@ def create_pm_request(
         )
         db.add(transaction)
     else:
-        if request.status == "REJECTED":
-            old_status = request.status
-            request.status = "PENDING_ARTWORK"
-            request.updated_at = datetime.utcnow()
-            transaction = models.PMCodeTransaction(
-                request_id=request.id,
-                from_state=old_status,
-                to_state="PENDING_ARTWORK",
-                action_by_dept="Regulatory",
-                action_by_user_id=current_user.id,
-                remarks="PM Code requested again"
-            )
-            db.add(transaction)
+        old_status = request.status
+        request.status = "PENDING_ARTWORK"
+        request.updated_at = datetime.utcnow()
+        transaction = models.PMCodeTransaction(
+            request_id=request.id,
+            from_state=old_status,
+            to_state="PENDING_ARTWORK",
+            action_by_dept="Regulatory",
+            action_by_user_id=current_user.id,
+            remarks="PM Code requested from Artwork team"
+        )
+        db.add(transaction)
             
     db.commit()
     db.refresh(request)
@@ -356,7 +368,18 @@ def submit_pm_code(
     request.current_secondary_pm_code = data.secondary_pm_code
     request.current_leaf_pm_code = data.leaf_pm_code
     request.updated_at = now
-    
+
+    # Also update product.primary_pm_code directly on Product model
+    product = db.query(models.Product).filter(models.Product.sku_code == request.product_sku).first()
+    if product:
+        if data.primary_pm_code:
+            product.primary_pm_code = data.primary_pm_code
+        if data.secondary_pm_code:
+            product.secondary_pm_code = data.secondary_pm_code
+        if data.leaf_pm_code:
+            product.leaf_pm_code = data.leaf_pm_code
+        db.add(product)
+
     transaction = models.PMCodeTransaction(
         request_id=request.id,
         from_state=old_status,
@@ -372,6 +395,7 @@ def submit_pm_code(
     )
     db.add(transaction)
     db.commit()
+
     db.refresh(request)
     return request
 
@@ -451,12 +475,28 @@ def get_registrations(
     return registrations
 
 
+DEFAULT_COUNTRIES = [
+    "Afghanistan", "Albania", "Algeria", "Argentina", "Australia", "Austria", "Bangladesh", "Belgium", "Brazil", 
+    "Cambodia", "Canada", "Chile", "China", "Colombia", "Denmark", "Egypt", "Ethiopia", "France", "Germany", 
+    "Ghana", "Greece", "India", "Indonesia", "Iran", "Iraq", "Ireland", "Israel", "Italy", "Japan", "Jordan", 
+    "Kenya", "Korea (South)", "Kuwait", "Malaysia", "Mexico", "Myanmar", "Nepal", "Netherlands", "New Zealand", 
+    "Nigeria", "Norway", "Oman", "Pakistan", "Peru", "Philippines", "Poland", "Portugal", "Qatar", "Russia", 
+    "Saudi Arabia", "Singapore", "South Africa", "Spain", "Sri Lanka", "Sudan", "Sweden", "Switzerland", 
+    "Taiwan", "Tanzania", "Thailand", "Turkey", "UAE", "Uganda", "Ukraine", "United Kingdom", "United States", 
+    "Uzbekistan", "Vietnam", "Zambia", "Zimbabwe"
+]
+
+DEFAULT_CATEGORIES = [
+    "Drug", "Nutra", "Excipient", "Pharmaceutical", "Nutraceutical", "Cosmetic", "Medical Device", "OTC", 
+    "Herbal / Botanical", "Biological", "Veterinary", "Food Supplement"
+]
+
 @app.get("/api/countries", response_model=schemas.CountryListResponse)
 def get_countries(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    countries = (
+    p_countries = (
         db.query(models.Product.country)
         .filter(models.Product.country.isnot(None))
         .filter(models.Product.country != "")
@@ -464,10 +504,32 @@ def get_countries(
         .order_by(models.Product.country)
         .all()
     )
+    product_countries = sorted(list(set([c[0].strip() for c in p_countries if c[0] and c[0].strip()])))
+    
+    if not product_countries:
+        c_countries = db.query(models.Customer.country).filter(models.Customer.country.isnot(None), models.Customer.country != "").distinct().all()
+        r_countries = db.query(models.Registration.country).filter(models.Registration.country.isnot(None), models.Registration.country != "").distinct().all()
+        fallback = set([c[0].strip() for c in c_countries + r_countries if c[0] and c[0].strip()])
+        if not fallback:
+            fallback = set(["India", "USA", "UK", "Germany", "UAE", "Singapore", "Vietnam", "Myanmar"])
+        product_countries = sorted(list(fallback))
 
     return {
-        "countries": [c[0] for c in countries]
+        "countries": product_countries
     }
+
+
+@app.get("/api/categories", response_model=schemas.CategoryListResponse)
+def get_categories(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    return {
+        "categories": ["Drug", "Nutra", "Excipient"]
+    }
+
+
+
 
 @app.post("/api/registrations", response_model=schemas.RegistrationResponse)
 def create_registration(
@@ -677,7 +739,7 @@ def create_milestones(order: models.Order, db: Session):
         # Artwork milestones
         # {"name": "Artwork Requested", "category": "Artwork"},
         # {"name": "Artwork Approved", "category": "Artwork"},
-        {"name": "PM Procurement Released", "category": "Artwork"},
+        {"name": "PO Released", "category": "Artwork"},
         {"name": "PM Received", "category": "Artwork"},
         # SCM milestones
         {"name": "Production Planned", "category": "SCM"},
@@ -904,6 +966,15 @@ def get_order(
     ).filter(models.Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    modified = False
+    for m in (order.milestones or []):
+        if m.name == "PM Procurement Released":
+            m.name = "PO Released"
+            modified = True
+    if modified:
+        db.commit()
+
     return order
 
 
@@ -1489,6 +1560,87 @@ def update_milestone(
     db.commit()
     return {"message": "Milestone updated successfully"}
 
+@app.put("/api/milestones/{milestone_id}")
+def update_milestone_by_id(
+    milestone_id: int,
+    milestone_update: schemas.MilestoneUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    milestone = db.query(models.Milestone).filter(models.Milestone.id == milestone_id).first()
+    if not milestone:
+        raise HTTPException(status_code=404, detail="Milestone not found")
+
+    order = db.query(models.Order).filter(models.Order.id == milestone.order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    user_dept = current_user.department
+    prev_status = milestone.status
+
+    if milestone_update.status:
+        milestone.status = milestone_update.status
+    if milestone_update.target_date is not None:
+        milestone.target_date = milestone_update.target_date
+    if milestone_update.actual_date is not None:
+        milestone.actual_date = milestone_update.actual_date
+    if milestone_update.remarks is not None:
+        milestone.remarks = milestone_update.remarks
+
+    milestone.updated_at = datetime.utcnow()
+
+    if milestone.status == "COMPLETED" and milestone.target_date:
+        if milestone.actual_date and milestone.actual_date > milestone.target_date:
+            milestone.status = "DELAYED"
+            create_delay_alert(order, milestone, db)
+
+    update_order_status_from_milestones(order, db, current_user.id, request.client.host)
+
+    log_audit(
+        db, order.id, current_user.id, "MILESTONE_UPDATE",
+        prev_status, milestone.status,
+        f"Milestone '{milestone.name}' updated by {user_dept}",
+        request.client.host
+    )
+
+    db.commit()
+    return {"message": "Milestone updated successfully"}
+
+@app.post("/api/orders/{order_id}/milestones/target-dates")
+def set_bulk_target_dates(
+    order_id: int,
+    payload: schemas.BulkTargetDateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    if current_user.department != "Regulatory":
+        raise HTTPException(status_code=403, detail="Only Regulatory department can set milestone target dates in bulk.")
+
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    count = 0
+    for item in payload.milestones:
+        m = db.query(models.Milestone).filter(models.Milestone.id == item.milestone_id, models.Milestone.order_id == order_id).first()
+        if m:
+            m.target_date = item.target_date
+            m.updated_at = datetime.utcnow()
+            count += 1
+
+    log_audit(
+        db, order_id, current_user.id, "BULK_MILESTONE_TARGET_DATES_SET",
+        None, None,
+        f"Regulatory user set target dates for {count} milestones",
+        request.client.host
+    )
+
+    db.commit()
+    return {"message": f"Successfully updated target dates for {count} milestones"}
+
+
 def create_delay_alert(order: models.Order, milestone: models.Milestone, db: Session):
     """Create alert for delayed milestone"""
     alert = models.Alert(
@@ -1675,4 +1827,5 @@ def get_dashboard(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, timeout_keep_alive=600, log_level="debug")
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, timeout_keep_alive=600, log_level="debug")
+

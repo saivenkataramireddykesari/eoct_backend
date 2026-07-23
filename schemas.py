@@ -358,4 +358,16 @@ class ComplianceCheckResult(BaseModel):
 class CountryListResponse(BaseModel):
     countries: List[str]
 
+class CategoryListResponse(BaseModel):
+    categories: List[str]
+
+class BulkTargetDateItem(BaseModel):
+    milestone_id: int
+    target_date: Optional[datetime] = None
+
+class BulkTargetDateRequest(BaseModel):
+    milestones: List[BulkTargetDateItem]
+
+
+
 
