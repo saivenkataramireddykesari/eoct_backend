@@ -82,7 +82,7 @@ class ProductBase(BaseModel):
     sku_code: str
     product_name: str
     category: Optional[str] = None
-    country: Optional[str] = None
+    country: str # Making country required for product creation with registration
     customer: Optional[str] = None
     pack_size: Optional[str] = None
     standard_batch_size: Optional[int] = None
@@ -93,8 +93,34 @@ class ProductBase(BaseModel):
     current_artwork_version: Optional[str] = None
     artwork_status: str = "Not Available"
 
+class RegistrationDetails(BaseModel):
+    registration_number: str
+    registration_status: str = "Active"
+    registration_issue_date: Optional[date] = None
+    registration_expiry_date: Optional[date] = None
+    remarks: Optional[str] = None
+
+class ProductWithRegistrationCreate(ProductBase):
+    registration: RegistrationDetails
+
 class ProductCreate(ProductBase):
     pass
+
+class ProductUpdate(BaseModel):
+    product_name: Optional[str] = None
+    category: Optional[str] = None
+    country: Optional[str] = None
+    customer: Optional[str] = None
+    pack_size: Optional[str] = None
+    standard_batch_size: Optional[int] = None
+    moq: Optional[int] = None
+    primary_pm_code: Optional[str] = None
+    secondary_pm_code: Optional[str] = None
+    leaf_pm_code: Optional[str] = None
+    current_artwork_version: Optional[str] = None
+    artwork_status: Optional[str] = None
+    is_active: Optional[bool] = None
+
 
 class ProductResponse(ProductBase):
     id: int
@@ -106,19 +132,15 @@ class ProductResponse(ProductBase):
     class Config:
         from_attributes = True
 
-class SkuItem(BaseModel):
+class ProductSearchItem(BaseModel):
     sku_code: str
     product_name: str
 
     class Config:
         from_attributes = True
 
-class SkuItem(BaseModel):
-    sku_code: str
-    product_name: str
-
-    class Config:
-        from_attributes = True
+class ProductSearchResponse(BaseModel):
+    products: List[ProductSearchItem]
 
 # Registration Schemas
 class RegistrationBase(BaseModel):
@@ -192,6 +214,7 @@ class MilestoneResponse(MilestoneBase):
 class MilestoneUpdate(BaseModel):
     status: Optional[str] = None
     actual_date: Optional[date] = None
+    target_date: Optional[date] = None
     remarks: Optional[str] = None
 
 # Order Approval Schemas

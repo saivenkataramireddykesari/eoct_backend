@@ -15,7 +15,7 @@ import schemas
 import auth
 from database import engine, get_db, SessionLocal
 from auth import get_current_user, authenticate_user, create_access_token, get_password_hash
-from schemas import CanApproveResponse, CountryListResponse # Added CanApproveResponse, CountryListResponse
+from schemas import CanApproveResponse, CountryListResponse, ProductCreate, ProductSearchResponse, ProductSearchItem
 
 # Create database tables
 
@@ -69,7 +69,11 @@ security = HTTPBearer()
 
 @app.post("/api/auth/login", response_model=schemas.Token)
 def login(user_credentials: schemas.UserLogin, db: Session = Depends(get_db)):
+    print("Login endpoint entered")
+    print(f"User Credentials: {user_credentials.employee_id}")
+    print("Calling authenticate_user")
     user = authenticate_user(db, user_credentials.employee_id, user_credentials.password)
+    print("authenticate_user finished")
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -81,7 +85,9 @@ def login(user_credentials: schemas.UserLogin, db: Session = Depends(get_db)):
     user.last_login = datetime.utcnow()
     db.commit()
     
+    print("Creating JWT")
     access_token = create_access_token(data={"sub": user.employee_id})
+    print("Returning response")
     return {
         "access_token": access_token,
         "token_type": "bearer",
@@ -143,12 +149,24 @@ def create_user(
 def get_products(
     skip: int = 0,
     limit: int = 20,
+    scm_user_type: Optional[str] = None, # New parameter for filtering
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
     query = db.query(models.Product).options(
         selectinload(models.Product.pm_code_requests).selectinload(models.PMCodeRequest.transactions)
     )
+
+    if scm_user_type:
+        if scm_user_type.lower() == "pp":
+            query = query.filter(
+                (models.Product.category == "PP") | (models.Product.category == "ALL")
+            )
+        elif scm_user_type.lower() == "pns":
+            query = query.filter(
+                (models.Product.category == "PNS") | (models.Product.category == "ALL")
+            )
+
     products = query.offset(skip).limit(limit).all()
     return products
 
@@ -164,16 +182,46 @@ def create_product(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only Regulatory department can create products"
         )
+
     # Check if SKU already exists
-    db_product = db.query(models.Product).filter(models.Product.sku_code == product.sku_code).first()
-    if db_product:
+    existing_product = db.query(models.Product).filter(models.Product.sku_code == product.sku_code).first()
+    if existing_product:
         raise HTTPException(status_code=400, detail="SKU code already exists")
-    
+
     db_product = models.Product(**product.dict())
     db.add(db_product)
     db.commit()
     db.refresh(db_product)
     return db_product
+
+
+@app.put("/api/products/{product_id}", response_model=schemas.ProductResponse)
+def update_product(
+    product_id: int,
+    product_update: schemas.ProductUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    if current_user.department != "Regulatory":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only Regulatory department can update products"
+        )
+
+    db_product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not db_product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    update_data = product_update.dict(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_product, key, value)
+
+    db_product.updated_at = datetime.utcnow()
+    db.add(db_product)
+    db.commit()
+    db.refresh(db_product)
+    return db_product
+
 
 @app.get("/api/products/by-country", response_model=List[schemas.ProductResponse])
 def get_products_by_country(
@@ -191,65 +239,66 @@ def get_products_by_country(
 
     return products
 
-    
-@app.get("/api/skus/{country}", response_model=List[schemas.SkuItem])
-def get_skus_by_country(
-    country: str,
+
+@app.get("/api/products/search-sku", response_model=schemas.ProductSearchResponse)
+def search_skus(
+    query: str = "",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Return SKUs (code and name) that have an active registration for the given country."""
-    registered_skus_codes = db.query(models.Registration.sku).filter(
-        models.Registration.country == country,
-        models.Registration.registration_status == "Active"
-    ).distinct().all()
+    """Search for products by partial SKU code or product name."""
+    if not query:
+        return {"products": []}
     
-    sku_list = [r.sku for r in registered_skus_codes]
-    if not sku_list:
-        return []
-
     products = db.query(models.Product).filter(
-        models.Product.sku_code.in_(sku_list),
-        models.Product.is_active == True
-    ).all()
+        models.Product.sku_code.ilike(f"%{query}%") | models.Product.product_name.ilike(f"%{query}%")
+    ).limit(10).all()
     
-    return [schemas.SkuItem(sku_code=p.sku_code, product_name=p.product_name) for p in products]
+    return {"products": [schemas.ProductSearchItem(sku_code=p.sku_code, product_name=p.product_name) for p in products]}
 
-@app.get("/api/skus/{country}", response_model=List[schemas.SkuItem])
-def get_skus_by_country(
-    country: str,
+@app.get("/api/products/sku/{sku_code}", response_model=schemas.ProductResponse)
+def get_product_by_sku(
+    sku_code: str,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(get_current_user) # Keep authentication for now
 ):
-    """Return SKUs (code and name) that have an active registration for the given country."""
-    registered_skus_codes = db.query(models.Registration.sku).filter(
-        models.Registration.country == country,
-        models.Registration.registration_status == "Active"
-    ).distinct().all()
-    
-    sku_list = [r.sku for r in registered_skus_codes]
-    if not sku_list:
-        return []
-
-    products = db.query(models.Product).filter(
-        models.Product.sku_code.in_(sku_list),
-        models.Product.is_active == True
-    ).all()
-    
-    return [schemas.SkuItem(sku_code=p.sku_code, product_name=p.product_name) for p in products]
-
-@app.get("/api/products/{sku}", response_model=schemas.ProductResponse)
-def get_product(
-    sku: str,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    product = db.query(models.Product).filter(models.Product.sku_code == sku).first()
-    if not product:
+    """Retrieve a single product by its SKU code."""
+    print(f"DEBUG: Attempting to fetch product with SKU: {sku_code}")
+    product = db.query(models.Product).filter(models.Product.sku_code == sku_code).first()
+    if product:
+        print(f"DEBUG: Found product: {product.product_name} ({product.sku_code})")
+    else:
+        print(f"DEBUG: Product with SKU: {sku_code} not found in DB.")
         raise HTTPException(status_code=404, detail="Product not found")
     return product
 
-@app.patch("/api/products/{sku}/pm-code")
+    
+@app.get("/api/skus/{country}", response_model=List[schemas.ProductSearchItem])
+def get_skus_by_country(
+    country: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Return SKUs (code and name) that have an active registration for the given country."""
+    registered_skus_codes = db.query(models.Registration.sku).filter(
+        models.Registration.country == country,
+        models.Registration.registration_status == "Active"
+    ).distinct().all()
+    
+    sku_list = [r.sku for r in registered_skus_codes]
+    if not sku_list:
+        return []
+
+    products = db.query(models.Product).filter(
+        models.Product.sku_code.in_(sku_list),
+        models.Product.is_active == True
+    ).all()
+    
+    return [schemas.SkuItem(sku_code=p.sku_code, product_name=p.product_name) for p in products]
+
+
+
+
 def update_product_pm_code(
     sku: str,
     data: dict,
@@ -465,12 +514,15 @@ def get_registrations(
     skip: int = 0,
     limit: int = 20,
     country: Optional[str] = None,
+    sku: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
     query = db.query(models.Registration).options(joinedload(models.Registration.product))
     if country:
         query = query.filter(models.Registration.country == country)
+    if sku:
+        query = query.filter(models.Registration.sku == sku)
     registrations = query.offset(skip).limit(limit).all()
     return registrations
 
@@ -525,35 +577,13 @@ def get_categories(
     current_user: models.User = Depends(get_current_user)
 ):
     return {
-        "categories": ["Drug", "Nutra", "Excipient"]
+        "categories": ["PP", "PNS", "ALL"]
     }
 
 
 
 
-@app.post("/api/registrations", response_model=schemas.RegistrationResponse)
-def create_registration(
-    registration: schemas.RegistrationCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    # Check for duplicate: same country + SKU + registration_number
-    existing = db.query(models.Registration).filter(
-        models.Registration.country == registration.country,
-        models.Registration.sku == registration.sku,
-        models.Registration.registration_number == registration.registration_number
-    ).first()
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This registration already exists for the selected country and SKU."
-        )
 
-    db_registration = models.Registration(**registration.dict())
-    db.add(db_registration)
-    db.commit()
-    db.refresh(db_registration)
-    return db_registration
 
 @app.get("/api/registrations/by-sku", response_model=List[schemas.RegistrationResponse])
 def get_registrations_by_sku(
@@ -576,6 +606,26 @@ def debug_registrations(db: Session = Depends(get_db), current_user: models.User
     registrations = db.query(models.Registration).all()
     print(f"DEBUG: All Registrations from DB: {registrations}")
     return registrations
+
+
+@app.get("/api/registrations/by-country-sku", response_model=Optional[schemas.RegistrationResponse])
+def get_registration_by_country_and_sku(
+    country: str,
+    sku: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Return a single registration for a given country and SKU, if it exists."""
+    registration = (
+        db.query(models.Registration)
+        .options(joinedload(models.Registration.product))
+        .filter(models.Registration.country == country)
+        .filter(models.Registration.sku == sku)
+        .first()
+    )
+    if not registration:
+        return {} 
+    return registration
 
 @app.post("/api/registrations/{registration_id}/upload")
 def upload_registration_certificate(
@@ -607,15 +657,50 @@ def upload_registration_certificate(
 def get_customers(
     skip: int = 0,
     limit: int = 20,
-    country: Optional[str] = None, # Added optional country filter
+    country: Optional[str] = None,
+    product_sku: Optional[str] = None,
+    product_name: Optional[str] = None,
+    product_category: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    query = db.query(models.Customer)
 
+    if country:
+        query = query.filter(models.Customer.country == country)
+
+    if product_sku or product_name or product_category:
+        # Filter customers that have products matching the criteria
+        # This assumes a direct relationship or a way to link customers to products based on these fields
+        # If product.customer stores customer_name and product.country stores product country
+        subquery = db.query(models.Product.customer).distinct()
+        if product_sku:
+            subquery = subquery.filter(models.Product.sku_code == product_sku)
+        if product_name:
+            subquery = subquery.filter(models.Product.product_name == product_name)
+        if product_category:
+            subquery = subquery.filter(models.Product.category == product_category)
+        if country: # Ensure product country matches customer country for consistency
+            subquery = subquery.filter(models.Product.country == country)
+
+        matching_customer_names = [c[0] for c in subquery.all()]
+        if matching_customer_names:
+            query = query.filter(models.Customer.customer_name.in_(matching_customer_names))
+        else:
+            return [] # No products match, so no customers to return
+
+    customers = query.offset(skip).limit(limit).all()
+    return customers
+
+@app.get("/api/debug/customers", response_model=List[schemas.CustomerResponse])
+def debug_get_customers(
+    country: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
     query = db.query(models.Customer)
     if country:
         query = query.filter(models.Customer.country == country)
-    customers = query.offset(skip).limit(limit).all()
+    customers = query.all()
     return customers
 
 @app.post("/api/customers", response_model=schemas.CustomerResponse)
@@ -1590,6 +1675,7 @@ def update_milestone_by_id(
 
     milestone.updated_at = datetime.utcnow()
 
+    # Check for delays
     if milestone.status == "COMPLETED" and milestone.target_date:
         if milestone.actual_date and milestone.actual_date > milestone.target_date:
             milestone.status = "DELAYED"
@@ -1615,8 +1701,8 @@ def set_bulk_target_dates(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    if current_user.department != "Regulatory":
-        raise HTTPException(status_code=403, detail="Only Regulatory department can set milestone target dates in bulk.")
+    if current_user.department != "SCM":
+        raise HTTPException(status_code=403, detail="Only SCM department can set milestone target dates in bulk.")
 
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not order:
@@ -1633,7 +1719,7 @@ def set_bulk_target_dates(
     log_audit(
         db, order_id, current_user.id, "BULK_MILESTONE_TARGET_DATES_SET",
         None, None,
-        f"Regulatory user set target dates for {count} milestones",
+        f"SCM user set target dates for {count} milestones",
         request.client.host
     )
 
@@ -1796,7 +1882,7 @@ def get_dashboard(
         # On-time delivery calculation
         delivered_orders = db.query(models.Order).filter(models.Order.status == "DELIVERED").all()
         on_time_count = sum(1 for o in delivered_orders 
-                          if o.delivered_at and o.delivered_at.date() <= o.requested_delivery_date)
+                           if o.delivered_at and o.delivered_at.date() <= o.requested_delivery_date)
         stats.on_time_deliveries = on_time_count
         stats.total_delivered = len(delivered_orders)
         
@@ -1828,4 +1914,3 @@ def get_dashboard(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, timeout_keep_alive=600, log_level="debug")
-
