@@ -52,6 +52,7 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login = Column(DateTime)
+    order_type = Column(String(50), nullable=True) # For SCM users (PP, PNS, ALL)
     
     approvals = relationship("OrderApproval", back_populates="approver")
     audit_logs = relationship("AuditLog", back_populates="user")
@@ -63,7 +64,8 @@ class Product(Base):
     sku_code = Column(String(50), unique=True, index=True, nullable=False)
     product_name = Column(String(200), nullable=False)
     category = Column(String(100))
-    country = Column(String(100))
+    country_id = Column(Integer, ForeignKey("countries.id"))
+    country = relationship("Country")
     customer = Column(String(200))
     pack_size = Column(String(50))
     standard_batch_size = Column(Integer)
@@ -85,7 +87,8 @@ class Registration(Base):
     __tablename__ = "registrations"
     
     id = Column(Integer, primary_key=True, index=True)
-    country = Column(String(100), nullable=False)
+    country_id = Column(Integer, ForeignKey("countries.id"), nullable=False)
+    country = relationship("Country")
     sku = Column(String(50), ForeignKey("products.sku_code"), nullable=False)
     registration_number = Column(String(100), nullable=False)
     registration_status = Column(String(50), default="Active")  # Active, Expired, Pending
@@ -99,12 +102,21 @@ class Registration(Base):
     
     product = relationship("Product", back_populates="registrations")
 
+class Country(Base):
+    __tablename__ = "countries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), unique=True, nullable=False)
+
+    customers = relationship("Customer", back_populates="country")
+
 class Customer(Base):
     __tablename__ = "customers"
     
     id = Column(Integer, primary_key=True, index=True)
     customer_name = Column(String(200), nullable=False)
-    country = Column(String(100), nullable=False)
+    country_id = Column(Integer, ForeignKey("countries.id"), nullable=False)
+
     payment_terms = Column(String(100))
     agreement_status = Column(String(50), default="Pending")  # Active, Expired, Pending
     agreement_validity = Column(Date)
@@ -112,6 +124,7 @@ class Customer(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    country = relationship("Country", back_populates="customers")
     orders = relationship("Order", back_populates="customer")
 
     @property
@@ -151,7 +164,8 @@ class Order(Base):
     order_id = Column(String(50), unique=True, index=True, nullable=False)
     order_number = Column(String(50), nullable=False)
     customer_id = Column(Integer, ForeignKey("customers.id"), nullable=False)
-    country = Column(String(100), nullable=False)
+    country_id = Column(Integer, ForeignKey("countries.id"), nullable=False)
+    country = relationship("Country")
     po_number = Column(String(50), nullable=False)
     po_date = Column(Date, nullable=False)
     sku = Column(String(50), ForeignKey("products.sku_code"), nullable=False)
@@ -289,4 +303,18 @@ class PMCodeTransaction(Base):
     
     request = relationship("PMCodeRequest", back_populates="transactions")
     user = relationship("User")
+
+class MilestoneHistory(Base):
+    __tablename__ = "milestone_history"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    milestone_id = Column(Integer, ForeignKey("milestones.id"), nullable=False)
+    change_type = Column(String(50), nullable=False)  # e.g., "TARGET_DATE_UPDATE", "STATUS_UPDATE"
+    old_value = Column(String(100))
+    new_value = Column(String(100))
+    changed_by_id = Column(Integer, ForeignKey("users.id"))
+    changed_at = Column(DateTime, default=datetime.utcnow)
+    
+    milestone = relationship("Milestone")
+    changed_by = relationship("User")
 

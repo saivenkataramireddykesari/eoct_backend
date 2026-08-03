@@ -3,6 +3,7 @@ from typing import Optional, List
 from datetime import date, datetime
 from models import OrderStatus, ApprovalStatus
 
+
 # User Schemas
 class UserBase(BaseModel):
     employee_id: str
@@ -11,6 +12,7 @@ class UserBase(BaseModel):
     department: str
     role: str = "user"
     is_active: bool = True
+    order_type: Optional[str] = None
 
 class UserCreate(UserBase):
     password: str
@@ -82,7 +84,7 @@ class ProductBase(BaseModel):
     sku_code: str
     product_name: str
     category: Optional[str] = None
-    country: str # Making country required for product creation with registration
+    country_id: Optional[int] = None
     customer: Optional[str] = None
     pack_size: Optional[str] = None
     standard_batch_size: Optional[int] = None
@@ -109,7 +111,7 @@ class ProductCreate(ProductBase):
 class ProductUpdate(BaseModel):
     product_name: Optional[str] = None
     category: Optional[str] = None
-    country: Optional[str] = None
+    country_id: Optional[int] = None
     customer: Optional[str] = None
     pack_size: Optional[str] = None
     standard_batch_size: Optional[int] = None
@@ -128,6 +130,7 @@ class ProductResponse(ProductBase):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     pm_code_requests: List[PMCodeRequestResponse] = []
+    country: Optional[Country] = None
 
     class Config:
         from_attributes = True
@@ -144,7 +147,7 @@ class ProductSearchResponse(BaseModel):
 
 # Registration Schemas
 class RegistrationBase(BaseModel):
-    country: str
+    country_id: int
     sku: str
     registration_number: str
     registration_status: str = "Active"
@@ -161,14 +164,28 @@ class RegistrationResponse(RegistrationBase):
     is_active: bool
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    country: Optional[Country] = None
 
     class Config:
         from_attributes = True
 
 # Customer Schemas
+class CountryBase(BaseModel):
+    name: str
+
+class CountryCreate(CountryBase):
+    pass
+
+class Country(CountryBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
 class CustomerBase(BaseModel):
     customer_name: str
-    country: str
+    country_id: int
+
     payment_terms: Optional[str] = None
     agreement_status: str = "Pending"
     agreement_validity: Optional[date] = None
@@ -185,9 +202,18 @@ class CustomerResponse(CustomerBase):
     default_artwork_status: Optional[str] = None # New field for auto-selection
     order_count: Optional[int] = None
     category: Optional[str] = None
+    country: Optional[Country] = None # Relationship
 
     class Config:
         from_attributes = True
+
+class CustomerUpdate(BaseModel):
+    customer_name: Optional[str] = None
+    country_id: Optional[int] = None
+    payment_terms: Optional[str] = None
+    agreement_status: Optional[str] = None
+    agreement_validity: Optional[date] = None
+    is_active: Optional[bool] = None
 
 
 # Milestone Schemas
@@ -293,7 +319,7 @@ class AuditLogResponse(AuditLogBase):
 class OrderBase(BaseModel):
     order_number: Optional[str] = None
     customer_id: int
-    country: str
+    country_id: int
     po_number: str
     po_date: date
     sku: str
@@ -328,6 +354,7 @@ class OrderResponse(OrderBase):
     approvals: List[OrderApprovalResponse] = []
     milestones: List[MilestoneResponse] = []
     alerts: List[AlertResponse] = []
+    country: Optional[Country] = None
 
     class Config:
         from_attributes = True
@@ -390,6 +417,18 @@ class BulkTargetDateItem(BaseModel):
 
 class BulkTargetDateRequest(BaseModel):
     milestones: List[BulkTargetDateItem]
+
+class MilestoneHistoryResponse(BaseModel):
+    id: int
+    milestone_id: int
+    change_type: str
+    old_value: Optional[str] = None
+    new_value: Optional[str] = None
+    changed_by: Optional[UserResponse] = None
+    changed_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 

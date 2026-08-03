@@ -8,14 +8,16 @@ import uuid
 import os
 import shutil
 import logging
-
+from time import perf_counter
+import traceback
 from sqlalchemy.orm import relationship, joinedload, selectinload
 import models
 import schemas
 import auth
 from database import engine, get_db, SessionLocal
 from auth import get_current_user, authenticate_user, create_access_token, get_password_hash
-from schemas import CanApproveResponse, CountryListResponse, ProductCreate, ProductSearchResponse, ProductSearchItem
+from schemas import CanApproveResponse, CountryListResponse, ProductCreate, ProductSearchResponse, ProductSearchItem, Country, CustomerResponse
+
 
 # Create database tables
 
@@ -69,30 +71,58 @@ security = HTTPBearer()
 
 @app.post("/api/auth/login", response_model=schemas.Token)
 def login(user_credentials: schemas.UserLogin, db: Session = Depends(get_db)):
-    print("Login endpoint entered")
-    print(f"User Credentials: {user_credentials.employee_id}")
-    print("Calling authenticate_user")
-    user = authenticate_user(db, user_credentials.employee_id, user_credentials.password)
-    print("authenticate_user finished")
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid employee ID or password",
-            headers={"WWW-Authenticate": "Bearer"},
+    start = perf_counter()
+
+    try:
+        print("========== LOGIN START ==========")
+
+        t = perf_counter()
+        print("1. Request received")
+        print("Employee:", user_credentials.employee_id)
+        print(f"Time: {perf_counter()-t:.3f}s")
+
+        t = perf_counter()
+        print("2. Calling authenticate_user...")
+        user = authenticate_user(
+            db,
+            user_credentials.employee_id,
+            user_credentials.password
         )
-    
-    # Update last login
-    user.last_login = datetime.utcnow()
-    db.commit()
-    
-    print("Creating JWT")
-    access_token = create_access_token(data={"sub": user.employee_id})
-    print("Returning response")
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": user
-    }
+        print(f"authenticate_user completed in {perf_counter()-t:.3f}s")
+
+        if not user:
+            print("User not found")
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid employee ID or password"
+            )
+
+        t = perf_counter()
+        print("3. Updating last_login")
+        user.last_login = datetime.utcnow()
+        db.commit()
+        print(f"Commit completed in {perf_counter()-t:.3f}s")
+
+        t = perf_counter()
+        print("4. Creating JWT")
+        access_token = create_access_token(
+            data={"sub": user.employee_id}
+        )
+        print(f"JWT created in {perf_counter()-t:.3f}s")
+
+        print(f"TOTAL LOGIN TIME: {perf_counter()-start:.3f}s")
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": user
+        }
+
+    except Exception:
+        traceback.print_exc()
+        raise
+
+
 
 @app.get("/api/auth/me", response_model=schemas.UserResponse)
 def get_current_user_info(current_user: models.User = Depends(get_current_user)):
@@ -154,10 +184,21 @@ def get_products(
     current_user: models.User = Depends(get_current_user)
 ):
     query = db.query(models.Product).options(
-        selectinload(models.Product.pm_code_requests).selectinload(models.PMCodeRequest.transactions)
+        selectinload(models.Product.pm_code_requests).selectinload(models.PMCodeRequest.transactions),
+        joinedload(models.Product.country)
     )
 
-    if scm_user_type:
+    if current_user.department == "SCM" and current_user.order_type:
+        order_type_to_use = current_user.order_type
+        if order_type_to_use == "PP":
+            query = query.filter(
+                (models.Product.category == "PP") | (models.Product.category == "ALL")
+            )
+        elif order_type_to_use == "PNS":
+            query = query.filter(
+                (models.Product.category == "PNS") | (models.Product.category == "ALL")
+            )
+    elif scm_user_type:
         if scm_user_type.lower() == "pp":
             query = query.filter(
                 (models.Product.category == "PP") | (models.Product.category == "ALL")
@@ -223,15 +264,39 @@ def update_product(
     return db_product
 
 
-@app.get("/api/products/by-country", response_model=List[schemas.ProductResponse])
+@app.get("/api/products/check-duplicate")
+def check_duplicate_product(
+    category: str,
+    country_name: str,
+    customer: str,
+    pack_size: str,
+    db: Session = Depends(get_db)
+):
+    country = db.query(models.Country).filter(models.Country.name == country_name).first()
+    if not country:
+        return {"is_duplicate": False}
+    
+    existing = db.query(models.Product).filter(
+        models.Product.category == category,
+        models.Product.country_id == country.id,
+        models.Product.customer == customer,
+        models.Product.pack_size == pack_size
+    ).first()
+    
+    if existing:
+        return {"is_duplicate": True, "sku": existing.sku_code}
+    return {"is_duplicate": False}
+
+
+@app.get("/api/products/by-country/{country_id}", response_model=List[schemas.ProductResponse])
 def get_products_by_country(
-    country: str,
+    country_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
     products = (
-        db.query(models.Product)
-        .filter(models.Product.country == country)
+        db.query(models.Product).options(joinedload(models.Product.country))
+        .filter(models.Product.country_id == country_id)
         .filter(models.Product.is_active == True)
         .order_by(models.Product.product_name)
         .all()
@@ -256,6 +321,17 @@ def search_skus(
     
     return {"products": [schemas.ProductSearchItem(sku_code=p.sku_code, product_name=p.product_name) for p in products]}
 
+@app.get("/api/products/last-sku")
+def get_last_sku(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Get the SKU code of the last created product."""
+    last_product = db.query(models.Product).order_by(models.Product.id.desc()).first()
+    if last_product:
+        return {"sku": last_product.sku_code}
+    return {"sku": None}
+
 @app.get("/api/products/sku/{sku_code}", response_model=schemas.ProductResponse)
 def get_product_by_sku(
     sku_code: str,
@@ -264,7 +340,7 @@ def get_product_by_sku(
 ):
     """Retrieve a single product by its SKU code."""
     print(f"DEBUG: Attempting to fetch product with SKU: {sku_code}")
-    product = db.query(models.Product).filter(models.Product.sku_code == sku_code).first()
+    product = db.query(models.Product).options(joinedload(models.Product.country)).filter(models.Product.sku_code == sku_code).first()
     if product:
         print(f"DEBUG: Found product: {product.product_name} ({product.sku_code})")
     else:
@@ -273,15 +349,55 @@ def get_product_by_sku(
     return product
 
     
-@app.get("/api/skus/{country}", response_model=List[schemas.ProductSearchItem])
+@app.get("/api/products/sku/{sku_code}", response_model=schemas.ProductResponse)
+def get_product_by_sku(
+    sku_code: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user) # Keep authentication for now
+):
+    """Retrieve a single product by its SKU code."""
+    print(f"DEBUG: Attempting to fetch product with SKU: {sku_code}")
+    product = db.query(models.Product).options(joinedload(models.Product.country)).filter(models.Product.sku_code == sku_code).first()
+    if product:
+        print(f"DEBUG: Found product: {product.product_name} ({product.sku_code})")
+    else:
+        print(f"DEBUG: Product with SKU: {sku_code} not found in DB.")
+        raise HTTPException(status_code=404, detail="Product not found")
+    return product
+
+
+@app.get("/api/products/filtered", response_model=List[schemas.ProductResponse])
+def get_filtered_products(
+    country_id: Optional[int] = None,
+    customer_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Retrieve products filtered by country and/or customer ID."""
+    query = db.query(models.Product).options(joinedload(models.Product.country)).filter(models.Product.is_active == True)
+
+    if country_id:
+        query = query.filter(models.Product.country_id == country_id)
+
+    if customer_id:
+        customer = db.query(models.Customer).filter(models.Customer.id == customer_id).first()
+        if not customer:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        query = query.filter(models.Product.customer == customer.customer_name)
+
+    products = query.order_by(models.Product.product_name).all()
+    return products
+
+
+@app.get("/api/skus/{country_id}", response_model=List[schemas.ProductSearchItem])
 def get_skus_by_country(
-    country: str,
+    country_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
     """Return SKUs (code and name) that have an active registration for the given country."""
     registered_skus_codes = db.query(models.Registration.sku).filter(
-        models.Registration.country == country,
+        models.Registration.country_id == country_id,
         models.Registration.registration_status == "Active"
     ).distinct().all()
     
@@ -294,7 +410,7 @@ def get_skus_by_country(
         models.Product.is_active == True
     ).all()
     
-    return [schemas.SkuItem(sku_code=p.sku_code, product_name=p.product_name) for p in products]
+    return [schemas.ProductSearchItem(sku_code=p.sku_code, product_name=p.product_name) for p in products]
 
 
 
@@ -513,14 +629,14 @@ def decide_pm_code(
 def get_registrations(
     skip: int = 0,
     limit: int = 20,
-    country: Optional[str] = None,
+    country_id: Optional[int] = None,
     sku: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    query = db.query(models.Registration).options(joinedload(models.Registration.product))
-    if country:
-        query = query.filter(models.Registration.country == country)
+    query = db.query(models.Registration).options(joinedload(models.Registration.product), joinedload(models.Registration.country))
+    if country_id:
+        query = query.filter(models.Registration.country_id == country_id)
     if sku:
         query = query.filter(models.Registration.sku == sku)
     registrations = query.offset(skip).limit(limit).all()
@@ -543,32 +659,24 @@ DEFAULT_CATEGORIES = [
     "Herbal / Botanical", "Biological", "Veterinary", "Food Supplement"
 ]
 
-@app.get("/api/countries", response_model=schemas.CountryListResponse)
+@app.get("/api/countries", response_model=List[schemas.Country])
 def get_countries(
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(auth.get_current_user)
 ):
-    p_countries = (
-        db.query(models.Product.country)
-        .filter(models.Product.country.isnot(None))
-        .filter(models.Product.country != "")
-        .distinct()
-        .order_by(models.Product.country)
-        .all()
-    )
-    product_countries = sorted(list(set([c[0].strip() for c in p_countries if c[0] and c[0].strip()])))
-    
-    if not product_countries:
-        c_countries = db.query(models.Customer.country).filter(models.Customer.country.isnot(None), models.Customer.country != "").distinct().all()
-        r_countries = db.query(models.Registration.country).filter(models.Registration.country.isnot(None), models.Registration.country != "").distinct().all()
-        fallback = set([c[0].strip() for c in c_countries + r_countries if c[0] and c[0].strip()])
-        if not fallback:
-            fallback = set(["India", "USA", "UK", "Germany", "UAE", "Singapore", "Vietnam", "Myanmar"])
-        product_countries = sorted(list(fallback))
+    """Retrieve all countries from the database."""
+    countries = db.query(models.Country).order_by(models.Country.name).all()
+    return countries
 
-    return {
-        "countries": product_countries
-    }
+@app.get("/api/customers/by-country/{country_id}", response_model=List[schemas.CustomerResponse])
+def get_customers_by_country_id(
+    country_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Retrieve customers by country ID."""
+    customers = db.query(models.Customer).options(joinedload(models.Customer.country)).filter(models.Customer.country_id == country_id).order_by(models.Customer.customer_name).all()
+    return customers
 
 
 @app.get("/api/categories", response_model=schemas.CategoryListResponse)
@@ -577,7 +685,7 @@ def get_categories(
     current_user: models.User = Depends(get_current_user)
 ):
     return {
-        "categories": ["PP", "PNS", "ALL"]
+        "categories": ["PP", "PNS"]
     }
 
 
@@ -595,7 +703,7 @@ def get_registrations_by_sku(
     registrations = (
         db.query(models.Registration)
         .filter(models.Registration.sku == sku)
-        .order_by(models.Registration.country)
+        .order_by(models.Registration.country_id)
         .all()
     )
     return registrations
@@ -610,7 +718,7 @@ def debug_registrations(db: Session = Depends(get_db), current_user: models.User
 
 @app.get("/api/registrations/by-country-sku", response_model=Optional[schemas.RegistrationResponse])
 def get_registration_by_country_and_sku(
-    country: str,
+    country_id: int,
     sku: str,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
@@ -618,8 +726,8 @@ def get_registration_by_country_and_sku(
     """Return a single registration for a given country and SKU, if it exists."""
     registration = (
         db.query(models.Registration)
-        .options(joinedload(models.Registration.product))
-        .filter(models.Registration.country == country)
+        .options(joinedload(models.Registration.product), joinedload(models.Registration.country))
+        .filter(models.Registration.country_id == country_id)
         .filter(models.Registration.sku == sku)
         .first()
     )
@@ -657,22 +765,19 @@ def upload_registration_certificate(
 def get_customers(
     skip: int = 0,
     limit: int = 20,
-    country: Optional[str] = None,
+    country_id: Optional[int] = None,
     product_sku: Optional[str] = None,
     product_name: Optional[str] = None,
     product_category: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(auth.get_current_user)
 ):
-    query = db.query(models.Customer)
+    query = db.query(models.Customer).options(joinedload(models.Customer.country))
 
-    if country:
-        query = query.filter(models.Customer.country == country)
+    if country_id:
+        query = query.filter(models.Customer.country_id == country_id)
 
     if product_sku or product_name or product_category:
-        # Filter customers that have products matching the criteria
-        # This assumes a direct relationship or a way to link customers to products based on these fields
-        # If product.customer stores customer_name and product.country stores product country
         subquery = db.query(models.Product.customer).distinct()
         if product_sku:
             subquery = subquery.filter(models.Product.sku_code == product_sku)
@@ -680,8 +785,11 @@ def get_customers(
             subquery = subquery.filter(models.Product.product_name == product_name)
         if product_category:
             subquery = subquery.filter(models.Product.category == product_category)
-        if country: # Ensure product country matches customer country for consistency
-            subquery = subquery.filter(models.Product.country == country)
+
+        # If a country_id is provided, filter products by that country as well
+        if country_id:
+            subquery = subquery.join(models.Customer, models.Product.customer == models.Customer.customer_name)
+            subquery = subquery.filter(models.Customer.country_id == country_id)
 
         matching_customer_names = [c[0] for c in subquery.all()]
         if matching_customer_names:
@@ -694,12 +802,12 @@ def get_customers(
 
 @app.get("/api/debug/customers", response_model=List[schemas.CustomerResponse])
 def debug_get_customers(
-    country: Optional[str] = None,
+    country_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
-    query = db.query(models.Customer)
-    if country:
-        query = query.filter(models.Customer.country == country)
+    query = db.query(models.Customer).options(joinedload(models.Customer.country))
+    if country_id:
+        query = query.filter(models.Customer.country_id == country_id)
     customers = query.all()
     return customers
 
@@ -707,9 +815,12 @@ def debug_get_customers(
 def create_customer(
     customer: schemas.CustomerCreate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(auth.get_current_user)
 ):
-    db_customer = models.Customer(**customer.dict())
+    db_customer = models.Customer(**customer.dict(exclude_unset=True))
+    
+
+
     db.add(db_customer)
     db.commit()
     db.refresh(db_customer)
@@ -719,24 +830,24 @@ def create_customer(
 def get_products_for_customer(
     customer_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(auth.get_current_user)
 ):
     """Return products for the given customer's country and customer name."""
-    customer = db.query(models.Customer).filter(models.Customer.id == customer_id).first()
+    customer = db.query(models.Customer).options(joinedload(models.Customer.country)).filter(models.Customer.id == customer_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    # Fetch products that match the customer's country and customer name
-    products = db.query(models.Product).filter(
-        models.Product.country == customer.country,
+    # Fetch products that match the customer's country_id and customer name
+    products = db.query(models.Product).options(joinedload(models.Product.country)).filter(
+        models.Product.country_id == customer.country_id,
         models.Product.customer == customer.customer_name,
         models.Product.is_active == True
     ).all()
     
     # Fallback to country matching products if no customer-specific products are found
     if not products:
-        products = db.query(models.Product).filter(
-            models.Product.country == customer.country,
+        products = db.query(models.Product).options(joinedload(models.Product.country)).filter(
+            models.Product.country_id == customer.country_id,
             models.Product.is_active == True
         ).all()
         
@@ -747,13 +858,34 @@ def get_products_for_customer(
 def get_customer(
     customer_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(auth.get_current_user)
 ):
-    customer = db.query(models.Customer).filter(models.Customer.id == customer_id).first()
+    customer = db.query(models.Customer).options(joinedload(models.Customer.country)).filter(models.Customer.id == customer_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
     return customer
+
+@app.put("/api/customers/{customer_id}", response_model=schemas.CustomerResponse)
+def update_customer(
+    customer_id: int,
+    customer_update: schemas.CustomerUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    db_customer = db.query(models.Customer).options(joinedload(models.Customer.country)).filter(models.Customer.id == customer_id).first()
+    if not db_customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    update_data = customer_update.dict(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_customer, key, value)
+
+    db_customer.updated_at = datetime.utcnow()
+    db.add(db_customer)
+    db.commit()
+    db.refresh(db_customer)
+    return db_customer
 
 
 
@@ -765,15 +897,15 @@ def run_compliance_check(order: models.Order, db: Session):
     
     # Check registration
     registration = db.query(models.Registration).filter(
-        models.Registration.country == order.country,
+        models.Registration.country_id == order.country_id,
         models.Registration.sku == order.sku,
         models.Registration.registration_status == "Active"
     ).first()
     
     if not registration:
-        issues.append(f"No active registration found for SKU {order.sku} in {order.country}")
+        issues.append(f"No active registration found for SKU {order.sku} in {order.country.name}")
     elif registration.registration_expiry_date and registration.registration_expiry_date < date.today():
-        issues.append(f"Registration expired for SKU {order.sku} in {order.country}")
+        issues.append(f"Registration expired for SKU {order.sku} in {order.country.name}")
     elif registration.registration_expiry_date and registration.registration_expiry_date < order.requested_delivery_date:
         issues.append(f"Registration expires before delivery date")
     
@@ -915,6 +1047,7 @@ def get_orders(
     query = db.query(models.Order).options(
         joinedload(models.Order.customer),
         joinedload(models.Order.product),
+        joinedload(models.Order.country),
         selectinload(models.Order.approvals).joinedload(models.OrderApproval.approver),
         selectinload(models.Order.milestones),
         selectinload(models.Order.alerts)
@@ -923,6 +1056,14 @@ def get_orders(
     # Filter for Artwork department: only show orders that are pending artwork process
     if current_user.department == "Artwork":
         query = query.filter(models.Order.status == models.OrderStatus.PENDING_ARTWORK_PROCESS.value)
+        
+    # Filter for SCM department based on order_type
+    if current_user.department == "SCM" and getattr(current_user, 'order_type', None):
+        query = query.join(models.Product)
+        if current_user.order_type == "PP":
+            query = query.filter((models.Product.category == "PP") | (models.Product.category == "ALL"))
+        elif current_user.order_type == "PNS":
+            query = query.filter((models.Product.category == "PNS") | (models.Product.category == "ALL"))
     
     if status:
         query = query.filter(models.Order.status == status)
@@ -950,7 +1091,8 @@ def create_order(
     
     # Auto-generate order_number
     customer = db.query(models.Customer).filter(models.Customer.id == order.customer_id).first()
-    country_prefix = order.country[:3].upper() if order.country else "XXX"
+    country_obj = db.query(models.Country).filter(models.Country.id == order.country_id).first()
+    country_prefix = country_obj.name[:3].upper() if country_obj and country_obj.name else "XXX"
     customer_prefix = customer.customer_name[:3].upper() if customer and customer.customer_name else "XXX"
     current_time = datetime.now()
     order_number = f"{country_prefix}-{customer_prefix}-{current_time.strftime('%m%Y')}"
@@ -1045,6 +1187,7 @@ def get_order(
     order = db.query(models.Order).options(
         joinedload(models.Order.customer),
         joinedload(models.Order.product),
+        joinedload(models.Order.country),
         selectinload(models.Order.approvals).joinedload(models.OrderApproval.approver),
         selectinload(models.Order.milestones),
         selectinload(models.Order.alerts)
@@ -1619,6 +1762,19 @@ def update_milestone(
 
     if milestone_update.status:
         milestone.status = milestone_update.status
+    if milestone_update.target_date is not None:
+        if milestone.target_date != milestone_update.target_date:
+            old_val = str(milestone.target_date) if milestone.target_date else None
+            new_val = str(milestone_update.target_date) if milestone_update.target_date else None
+            hist = models.MilestoneHistory(
+                milestone_id=milestone.id,
+                change_type="TARGET_DATE_UPDATE",
+                old_value=old_val,
+                new_value=new_val,
+                changed_by_id=current_user.id
+            )
+            db.add(hist)
+        milestone.target_date = milestone_update.target_date
     if milestone_update.actual_date:
         milestone.actual_date = milestone_update.actual_date
     if milestone_update.remarks:
@@ -1667,6 +1823,17 @@ def update_milestone_by_id(
     if milestone_update.status:
         milestone.status = milestone_update.status
     if milestone_update.target_date is not None:
+        if milestone.target_date != milestone_update.target_date:
+            old_val = str(milestone.target_date) if milestone.target_date else None
+            new_val = str(milestone_update.target_date) if milestone_update.target_date else None
+            hist = models.MilestoneHistory(
+                milestone_id=milestone.id,
+                change_type="TARGET_DATE_UPDATE",
+                old_value=old_val,
+                new_value=new_val,
+                changed_by_id=current_user.id
+            )
+            db.add(hist)
         milestone.target_date = milestone_update.target_date
     if milestone_update.actual_date is not None:
         milestone.actual_date = milestone_update.actual_date
@@ -1701,8 +1868,8 @@ def set_bulk_target_dates(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    if current_user.department != "SCM":
-        raise HTTPException(status_code=403, detail="Only SCM department can set milestone target dates in bulk.")
+    if current_user.department not in ["SCM", "Exports", "Exports Team"]:
+        raise HTTPException(status_code=403, detail="Only SCM and Exports departments can set milestone target dates in bulk.")
 
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not order:
@@ -1711,7 +1878,17 @@ def set_bulk_target_dates(
     count = 0
     for item in payload.milestones:
         m = db.query(models.Milestone).filter(models.Milestone.id == item.milestone_id, models.Milestone.order_id == order_id).first()
-        if m:
+        if m and m.target_date != item.target_date:
+            old_val = str(m.target_date) if m.target_date else None
+            new_val = str(item.target_date) if item.target_date else None
+            hist = models.MilestoneHistory(
+                milestone_id=m.id,
+                change_type="TARGET_DATE_UPDATE",
+                old_value=old_val,
+                new_value=new_val,
+                changed_by_id=current_user.id
+            )
+            db.add(hist)
             m.target_date = item.target_date
             m.updated_at = datetime.utcnow()
             count += 1
@@ -1893,7 +2070,8 @@ def get_dashboard(
     # Recent orders
     recent_orders = db.query(models.Order).options(
         joinedload(models.Order.customer),
-        joinedload(models.Order.product)
+        joinedload(models.Order.product),
+        joinedload(models.Order.country)
     ).order_by(models.Order.created_at.desc()).limit(10).all()
 
     
@@ -1908,6 +2086,17 @@ def get_dashboard(
         recent_orders=recent_orders,
         alerts=alerts
     )
+
+@app.get("/api/milestones/{milestone_id}/history", response_model=List[schemas.MilestoneHistoryResponse])
+def get_milestone_history(
+    milestone_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    history = db.query(models.MilestoneHistory).filter(
+        models.MilestoneHistory.milestone_id == milestone_id
+    ).options(joinedload(models.MilestoneHistory.changed_by)).order_by(models.MilestoneHistory.changed_at.desc()).all()
+    return history
 
 # ==================== INITIALIZATION ====================
 
