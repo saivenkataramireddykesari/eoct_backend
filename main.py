@@ -42,7 +42,7 @@ def update_existing_milestone_names():
             logging.info(f"Updated {updated_count} existing milestone(s) from 'PM Procurement Released' to 'PO Released'.")
     except Exception as e:
         db.rollback()
-        logging.error(f"Error updating milestone names on startup: {e}")
+        logging.exception("Error updating milestone names on startup:") # Using logging.exception for full traceback
     finally:
         db.close()
 
@@ -54,6 +54,14 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = perf_counter()
+    response = await call_next(request)
+    process_time = perf_counter() - start_time
+    logging.info(f"Request {request.method} {request.url.path} finished in {process_time:.4f}s with status {response.status_code}")
+    return response
 
 # Debug endpoint to list all milestones
 @app.get("/milestones_debug")

@@ -1,3 +1,4 @@
+from __future__ import annotations
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import date, datetime
@@ -130,7 +131,7 @@ class ProductResponse(ProductBase):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     pm_code_requests: List[PMCodeRequestResponse] = []
-    country: Optional[Country] = None
+    country: Optional["Country"] = None
 
     class Config:
         from_attributes = True
@@ -164,7 +165,7 @@ class RegistrationResponse(RegistrationBase):
     is_active: bool
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-    country: Optional[Country] = None
+    country: Optional["Country"] = None
 
     class Config:
         from_attributes = True
@@ -202,7 +203,7 @@ class CustomerResponse(CustomerBase):
     default_artwork_status: Optional[str] = None # New field for auto-selection
     order_count: Optional[int] = None
     category: Optional[str] = None
-    country: Optional[Country] = None # Relationship
+    country: Optional["Country"] = None # Relationship
 
     class Config:
         from_attributes = True
@@ -354,7 +355,7 @@ class OrderResponse(OrderBase):
     approvals: List[OrderApprovalResponse] = []
     milestones: List[MilestoneResponse] = []
     alerts: List[AlertResponse] = []
-    country: Optional[Country] = None
+    country: Optional["Country"] = None
 
     class Config:
         from_attributes = True
@@ -429,6 +430,12 @@ class MilestoneHistoryResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+ProductResponse.model_rebuild()
+RegistrationResponse.model_rebuild()
+CustomerResponse.model_rebuild()
+OrderResponse.model_rebuild()
 
 
 
