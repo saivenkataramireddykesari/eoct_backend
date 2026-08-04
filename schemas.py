@@ -432,10 +432,10 @@ class MilestoneHistoryResponse(BaseModel):
         from_attributes = True
 
 
-ProductResponse.model_rebuild()
-RegistrationResponse.model_rebuild()
-CustomerResponse.model_rebuild()
-OrderResponse.model_rebuild()
+ProductResponse.model_rebuild(_types_namespace=globals())
+RegistrationResponse.model_rebuild(_types_namespace=globals())
+CustomerResponse.model_rebuild(_types_namespace=globals())
+OrderResponse.model_rebuild(_types_namespace=globals())
 
 
 
