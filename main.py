@@ -296,15 +296,19 @@ def check_duplicate_product(
     return {"is_duplicate": False}
 
 
-@app.get("/api/products/by-country/{country_id}", response_model=List[schemas.ProductResponse])
+@app.get("/api/products/by-country/{country_name}", response_model=List[schemas.ProductResponse])
 def get_products_by_country(
-    country_id: int,
+    country_name: str,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    country = db.query(models.Country).filter(models.Country.name == country_name).first()
+    if not country:
+        raise HTTPException(status_code=404, detail="Country not found")
+
     products = (
         db.query(models.Product).options(joinedload(models.Product.country))
-        .filter(models.Product.country_id == country_id)
+        .filter(models.Product.country_id == country.id)
         .filter(models.Product.is_active == True)
         .order_by(models.Product.product_name)
         .all()
@@ -1779,7 +1783,7 @@ def update_milestone(
                 change_type="TARGET_DATE_UPDATE",
                 old_value=old_val,
                 new_value=new_val,
-                changed_by_id=current_user.id
+                changed_by_user_id=current_user.id
             )
             db.add(hist)
         milestone.target_date = milestone_update.target_date
@@ -1839,7 +1843,7 @@ def update_milestone_by_id(
                 change_type="TARGET_DATE_UPDATE",
                 old_value=old_val,
                 new_value=new_val,
-                changed_by_id=current_user.id
+                changed_by_user_id=current_user.id
             )
             db.add(hist)
         milestone.target_date = milestone_update.target_date
@@ -1894,7 +1898,7 @@ def set_bulk_target_dates(
                 change_type="TARGET_DATE_UPDATE",
                 old_value=old_val,
                 new_value=new_val,
-                changed_by_id=current_user.id
+                changed_by_user_id=current_user.id
             )
             db.add(hist)
             m.target_date = item.target_date
@@ -2101,9 +2105,9 @@ def get_milestone_history(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    history = db.query(models.MilestoneHistory).filter(
+    history = db.query(models.MilestoneHistory).options(joinedload(models.MilestoneHistory.changed_by_user)).filter(
         models.MilestoneHistory.milestone_id == milestone_id
-    ).options(joinedload(models.MilestoneHistory.changed_by)).order_by(models.MilestoneHistory.changed_at.desc()).all()
+    ).order_by(models.MilestoneHistory.changed_at.desc()).all()
     return history
 
 # ==================== INITIALIZATION ====================

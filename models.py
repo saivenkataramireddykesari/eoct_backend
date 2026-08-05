@@ -56,6 +56,7 @@ class User(Base):
     
     approvals = relationship("OrderApproval", back_populates="approver")
     audit_logs = relationship("AuditLog", back_populates="user")
+    milestone_history_entries = relationship("MilestoneHistory", back_populates="changed_by_user")
 
 class Product(Base):
     __tablename__ = "products"
@@ -312,9 +313,9 @@ class MilestoneHistory(Base):
     change_type = Column(String(50), nullable=False)  # e.g., "TARGET_DATE_UPDATE", "STATUS_UPDATE"
     old_value = Column(String(100))
     new_value = Column(String(100))
-    changed_by_id = Column(Integer, ForeignKey("users.id"))
+    changed_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     changed_at = Column(DateTime, default=datetime.utcnow)
     
     milestone = relationship("Milestone")
-    changed_by = relationship("User")
+    changed_by_user = relationship("User", foreign_keys=[changed_by_user_id], back_populates="milestone_history_entries")
 

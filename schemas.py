@@ -85,7 +85,7 @@ class ProductBase(BaseModel):
     sku_code: str
     product_name: str
     category: Optional[str] = None
-    country_id: Optional[int] = None
+    country_id: int
     customer: Optional[str] = None
     pack_size: Optional[str] = None
     standard_batch_size: Optional[int] = None
@@ -112,7 +112,7 @@ class ProductCreate(ProductBase):
 class ProductUpdate(BaseModel):
     product_name: Optional[str] = None
     category: Optional[str] = None
-    country_id: Optional[int] = None
+    country_id: int
     customer: Optional[str] = None
     pack_size: Optional[str] = None
     standard_batch_size: Optional[int] = None
@@ -210,7 +210,7 @@ class CustomerResponse(CustomerBase):
 
 class CustomerUpdate(BaseModel):
     customer_name: Optional[str] = None
-    country_id: Optional[int] = None
+    country_id: int
     payment_terms: Optional[str] = None
     agreement_status: Optional[str] = None
     agreement_validity: Optional[date] = None
