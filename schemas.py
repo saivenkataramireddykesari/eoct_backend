@@ -1,5 +1,5 @@
 from __future__ import annotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from datetime import date, datetime
 from models import OrderStatus, ApprovalStatus
@@ -61,7 +61,7 @@ class PMCodeRequestResponse(BaseModel):
     current_secondary_pm_code: Optional[str]
     current_leaf_pm_code: Optional[str]
     created_at: datetime
-    updated_at: datetime
+    updated_at: Optional[datetime] = None
     transactions: List[PMCodeTransactionResponse] = []
 
     class Config:
@@ -79,6 +79,10 @@ class PMCodeSubmit(BaseModel):
 class PMCodeDecision(BaseModel):
     decision: str  # ACCEPT or REJECT
     remarks: Optional[str] = None
+    primary_pm_code: Optional[str] = None
+    secondary_pm_code: Optional[str] = None
+    leaf_pm_code: Optional[str] = None
+    artwork_status: Optional[str] = None
 
 # Product Schemas
 class ProductBase(BaseModel):
@@ -145,6 +149,14 @@ class ProductSearchItem(BaseModel):
 
 class ProductSearchResponse(BaseModel):
     products: List[ProductSearchItem]
+
+class SearchSuggestion(BaseModel):
+    type: str  # e.g., "product", "customer", "order"
+    id: str    # e.g., SKU code, customer ID, order ID
+    name: str  # e.g., Product Name, Customer Name
+    
+class SearchSuggestionsResponse(BaseModel):
+    suggestions: List[SearchSuggestion]
 
 # Registration Schemas
 class RegistrationBase(BaseModel):
@@ -311,7 +323,7 @@ class AuditLogResponse(AuditLogBase):
     user_id: int
     timestamp: Optional[datetime]
     ip_address: Optional[str]
-    user: Optional[UserResponse]
+    user: Optional[UserResponse] = None
 
     class Config:
         from_attributes = True
@@ -324,6 +336,7 @@ class OrderBase(BaseModel):
     po_number: str
     po_date: date
     sku: str
+    category: Optional[str] = None
     sales_quantity: int = 0
     free_quantity: int = 0
     quantity: int
@@ -425,7 +438,13 @@ class MilestoneHistoryResponse(BaseModel):
     change_type: str
     old_value: Optional[str] = None
     new_value: Optional[str] = None
-    changed_by: Optional[UserResponse] = None
+
+    @validator('old_value', 'new_value', pre=True)
+    def convert_date_to_str(cls, v):
+        if isinstance(v, date):
+            return v.isoformat()
+        return v
+    changed_by_user: Optional[UserResponse] = None
     changed_at: datetime
 
     class Config:

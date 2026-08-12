@@ -170,6 +170,7 @@ class Order(Base):
     po_number = Column(String(50), nullable=False)
     po_date = Column(Date, nullable=False)
     sku = Column(String(50), ForeignKey("products.sku_code"), nullable=False)
+    category = Column(String(100))
     sales_quantity = Column(Integer, default=0)
     free_quantity = Column(Integer, default=0)
     quantity = Column(Integer, nullable=False)  # total = sales + free

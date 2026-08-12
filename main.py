@@ -1,3 +1,4 @@
+from typing import List
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer
@@ -16,7 +17,7 @@ import schemas
 import auth
 from database import engine, get_db, SessionLocal
 from auth import get_current_user, authenticate_user, create_access_token, get_password_hash
-from schemas import CanApproveResponse, CountryListResponse, ProductCreate, ProductSearchResponse, ProductSearchItem, Country, CustomerResponse
+from schemas import CanApproveResponse, CountryListResponse, ProductCreate, ProductSearchResponse, ProductSearchItem, Country, CustomerResponse, SearchSuggestionsResponse, SearchSuggestion
 
 
 # Create database tables
@@ -118,8 +119,6 @@ def login(user_credentials: schemas.UserLogin, db: Session = Depends(get_db)):
         )
         print(f"JWT created in {perf_counter()-t:.3f}s")
 
-        print(f"TOTAL LOGIN TIME: {perf_counter()-start:.3f}s")
-
         return {
             "access_token": access_token,
             "token_type": "bearer",
@@ -202,7 +201,7 @@ def get_products(
             query = query.filter(
                 (models.Product.category == "PP") | (models.Product.category == "ALL")
             )
-        elif order_type_to_use == "PNS":
+        elif current_user.order_type == "PNS":
             query = query.filter(
                 (models.Product.category == "PNS") | (models.Product.category == "ALL")
             )
@@ -317,18 +316,24 @@ def get_products_by_country(
     return products
 
 
-@app.get("/api/products/search-sku", response_model=schemas.ProductSearchResponse)
-def search_skus(
+@app.get("/api/products/search", response_model=schemas.ProductSearchResponse)
+def search_products(
     query: str = "",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Search for products by partial SKU code or product name."""
+    """Search for products by partial SKU code, product name, category, customer, or country name."""
     if not query:
         return {"products": []}
     
-    products = db.query(models.Product).filter(
-        models.Product.sku_code.ilike(f"%{query}%") | models.Product.product_name.ilike(f"%{query}%")
+    search_query = f"%{query}%"
+    
+    products = db.query(models.Product).options(joinedload(models.Product.country)).filter(
+        models.Product.sku_code.ilike(search_query) |
+        models.Product.product_name.ilike(search_query) |
+        models.Product.category.ilike(search_query) |
+        models.Product.customer.ilike(search_query) |
+        (models.Product.country.has(models.Country.name.ilike(search_query)))
     ).limit(10).all()
     
     return {"products": [schemas.ProductSearchItem(sku_code=p.sku_code, product_name=p.product_name) for p in products]}
@@ -401,30 +406,58 @@ def get_filtered_products(
     return products
 
 
-@app.get("/api/skus/{country_id}", response_model=List[schemas.ProductSearchItem])
+@app.get("/api/skus/{country_name}", response_model=List[schemas.ProductSearchItem])
 def get_skus_by_country(
-    country_id: int,
+    country_name: str,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Return SKUs (code and name) that have an active registration for the given country."""
-    registered_skus_codes = db.query(models.Registration.sku).filter(
-        models.Registration.country_id == country_id,
-        models.Registration.registration_status == "Active"
-    ).distinct().all()
-    
-    sku_list = [r.sku for r in registered_skus_codes]
-    if not sku_list:
-        return []
+    """Return SKUs (code and name) that have an active registration for the given country name."""
+    country = db.query(models.Country).filter(models.Country.name == country_name).first()
+    if not country:
+        raise HTTPException(status_code=404, detail="Country not found")
 
     products = db.query(models.Product).filter(
-        models.Product.sku_code.in_(sku_list),
+        models.Product.country_id == country.id,
         models.Product.is_active == True
-    ).all()
+    ).order_by(models.Product.product_name).all()
     
-    return [schemas.ProductSearchItem(sku_code=p.sku_code, product_name=p.product_name) for p in products]
+    return [schemas.ProductSearchItem(sku_code=p.sku_code, product_name=p.product_name, product_category=p.category) for p in products]
 
+@app.get("/api/search/suggestions", response_model=schemas.SearchSuggestionsResponse)
+def get_search_suggestions(
+    query: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    suggestions = []
+    if not query:
+        return {"suggestions": []}
 
+    # Example: Product search suggestions
+    products = db.query(models.Product).filter(
+        (models.Product.product_name.ilike(f"%{query}%")) | 
+        (models.Product.sku_code.ilike(f"%{query}%"))
+    ).limit(5).all()
+    for p in products:
+        suggestions.append(schemas.SearchSuggestion(type="product", id=p.sku_code, name=p.product_name))
+
+    # Example: Customer search suggestions
+    customers = db.query(models.Customer).filter(
+        models.Customer.customer_name.ilike(f"%{query}%")
+    ).limit(5).all()
+    for c in customers:
+        suggestions.append(schemas.SearchSuggestion(type="customer", id=str(c.id), name=c.customer_name))
+
+    # Example: Order search suggestions (by order_id or PO number)
+    orders = db.query(models.Order).filter(
+        (models.Order.order_id.ilike(f"%{query}%")) | 
+        (models.Order.po_number.ilike(f"%{query}%"))
+    ).limit(5).all()
+    for o in orders:
+        suggestions.append(schemas.SearchSuggestion(type="order", id=o.order_id, name=f"Order {o.order_id} (PO: {o.po_number})"))
+
+    return {"suggestions": suggestions}
 
 
 def update_product_pm_code(
@@ -512,70 +545,6 @@ def create_pm_request(
     db.refresh(request)
     return request
 
-@app.post("/api/products/pm-requests/{request_id}/submit", response_model=schemas.PMCodeRequestResponse)
-def submit_pm_code(
-    request_id: int,
-    data: schemas.PMCodeSubmit,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    if current_user.department != "Artwork":
-        raise HTTPException(status_code=403, detail="Only Artwork team can submit PM Code")
-    
-    request = db.query(models.PMCodeRequest).filter(models.PMCodeRequest.id == request_id).first()
-    if not request:
-        raise HTTPException(status_code=404, detail="PM Code Request not found")
-    
-    if request.status != "PENDING_ARTWORK":
-        raise HTTPException(status_code=400, detail="Request is not pending artwork action")
-    
-    last_tx = db.query(models.PMCodeTransaction).filter(
-        models.PMCodeTransaction.request_id == request.id
-    ).order_by(models.PMCodeTransaction.created_at.desc()).first()
-    
-    now = datetime.utcnow()
-    response_time_days = 0.0
-    if last_tx:
-        time_diff = now - last_tx.created_at
-        response_time_days = round(time_diff.total_seconds() / 86400.0, 2)
-    
-    old_status = request.status
-    request.status = "AWAITING_REGULATORY_APPROVAL"
-    request.current_primary_pm_code = data.primary_pm_code
-    request.current_secondary_pm_code = data.secondary_pm_code
-    request.current_leaf_pm_code = data.leaf_pm_code
-    request.updated_at = now
-
-    # Also update product.primary_pm_code directly on Product model
-    product = db.query(models.Product).filter(models.Product.sku_code == request.product_sku).first()
-    if product:
-        if data.primary_pm_code:
-            product.primary_pm_code = data.primary_pm_code
-        if data.secondary_pm_code:
-            product.secondary_pm_code = data.secondary_pm_code
-        if data.leaf_pm_code:
-            product.leaf_pm_code = data.leaf_pm_code
-        db.add(product)
-
-    transaction = models.PMCodeTransaction(
-        request_id=request.id,
-        from_state=old_status,
-        to_state="AWAITING_REGULATORY_APPROVAL",
-        action_by_dept="Artwork",
-        action_by_user_id=current_user.id,
-        primary_pm_code=data.primary_pm_code,
-        secondary_pm_code=data.secondary_pm_code,
-        leaf_pm_code=data.leaf_pm_code,
-        remarks=data.remarks,
-        created_at=now,
-        response_time_days=response_time_days
-    )
-    db.add(transaction)
-    db.commit()
-
-    db.refresh(request)
-    return request
-
 @app.post("/api/products/pm-requests/{request_id}/decide", response_model=schemas.PMCodeRequestResponse)
 def decide_pm_code(
     request_id: int,
@@ -608,9 +577,29 @@ def decide_pm_code(
         request.status = "APPROVED"
         product = db.query(models.Product).filter(models.Product.sku_code == request.product_sku).first()
         if product:
-            product.primary_pm_code = request.current_primary_pm_code
-            product.secondary_pm_code = request.current_secondary_pm_code
-            product.leaf_pm_code = request.current_leaf_pm_code
+            if data.primary_pm_code is not None:
+                product.primary_pm_code = data.primary_pm_code
+                request.current_primary_pm_code = data.primary_pm_code
+            else:
+                product.primary_pm_code = request.current_primary_pm_code
+
+            if data.secondary_pm_code is not None:
+                product.secondary_pm_code = data.secondary_pm_code
+                request.current_secondary_pm_code = data.secondary_pm_code
+            else:
+                product.secondary_pm_code = request.current_secondary_pm_code
+
+            if data.leaf_pm_code is not None:
+                product.leaf_pm_code = data.leaf_pm_code
+                request.current_leaf_pm_code = data.leaf_pm_code
+            else:
+                product.leaf_pm_code = request.current_leaf_pm_code
+
+            if data.artwork_status:
+                product.artwork_status = data.artwork_status
+            else:
+                product.artwork_status = "Available"
+
             db.add(product)
     else:
         request.status = "PENDING_ARTWORK"
@@ -699,10 +688,6 @@ def get_categories(
     return {
         "categories": ["PP", "PNS"]
     }
-
-
-
-
 
 
 @app.get("/api/registrations/by-sku", response_model=List[schemas.RegistrationResponse])
@@ -842,7 +827,7 @@ def create_customer(
 def get_products_for_customer(
     customer_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(get_current_user)
 ):
     """Return products for the given customer's country and customer name."""
     customer = db.query(models.Customer).options(joinedload(models.Customer.country)).filter(models.Customer.id == customer_id).first()
@@ -870,7 +855,7 @@ def get_products_for_customer(
 def get_customer(
     customer_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(get_current_user)
 ):
     customer = db.query(models.Customer).options(joinedload(models.Customer.country)).filter(models.Customer.id == customer_id).first()
     if not customer:
@@ -1071,7 +1056,7 @@ def get_orders(
         
     # Filter for SCM department based on order_type
     if current_user.department == "SCM" and getattr(current_user, 'order_type', None):
-        query = query.join(models.Product)
+        query = query.join(models.Order.product)
         if current_user.order_type == "PP":
             query = query.filter((models.Product.category == "PP") | (models.Product.category == "ALL"))
         elif current_user.order_type == "PNS":
@@ -1110,6 +1095,11 @@ def create_order(
     order_number = f"{country_prefix}-{customer_prefix}-{current_time.strftime('%m%Y')}"
     
     order_data = order.dict()
+    if not order_data.get('category'):
+        prod = db.query(models.Product).filter(models.Product.sku_code == order_data.get('sku')).first()
+        if prod and prod.category:
+            order_data['category'] = prod.category
+
     # If PO number is provided, append count
     if order.po_number:
         base_po_number = order.po_number  # Assuming po_number comes in as "MYA-LOY-07/26"
@@ -1281,6 +1271,90 @@ def update_order(
     db.refresh(db_order)
     return db_order
 
+@app.get("/api/orders/{order_id}/can-approve")
+def get_can_approve(
+    order_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    user_dept = current_user.department
+
+    all_approvals = db.query(models.OrderApproval).filter(
+        models.OrderApproval.order_id == order_id
+    ).order_by(models.OrderApproval.sequence).all()
+
+    # SCM Override Path
+    if user_dept == "SCM":
+        return {
+            "can_approve": True,
+            "is_scm_override": True,
+            "is_exports_override": False,
+            "reason": "SCM Override Available",
+            "current_sequence": None,
+            "waiting_for": None
+        }
+
+    # Find the first PENDING approval in sequence
+    next_pending = next((a for a in all_approvals if a.status == models.ApprovalStatus.PENDING.value), None)
+    if not next_pending:
+        return {
+            "can_approve": False,
+            "is_scm_override": False,
+            "is_exports_override": False,
+            "reason": "Order approvals are completed or finalized",
+            "current_sequence": None,
+            "waiting_for": None
+        }
+
+    # Exports Manager Path
+    if user_dept == "Exports":
+        if next_pending.department in [models.ApprovalDepartment.EXPORTS_MANAGER_INITIAL.value, models.ApprovalDepartment.EXPORTS_MANAGER_FINAL.value]:
+            return {
+                "can_approve": True,
+                "is_scm_override": False,
+                "is_exports_override": True,
+                "reason": None,
+                "current_sequence": next_pending.sequence,
+                "pending_department": next_pending.department,
+                "waiting_for": None
+            }
+        else:
+            return {
+                "can_approve": False,
+                "is_scm_override": False,
+                "is_exports_override": True,
+                "reason": f"Waiting for {next_pending.department} approval first",
+                "current_sequence": next_pending.sequence,
+                "waiting_for": {"department": next_pending.department}
+            }
+
+    # Other departments
+    user_dept_enum = get_user_approval_department(user_dept, all_approvals)
+    if user_dept_enum and next_pending.department == user_dept_enum.value:
+        return {
+            "can_approve": True,
+            "is_scm_override": False,
+            "is_exports_override": False,
+            "reason": None,
+            "current_sequence": next_pending.sequence,
+            "pending_department": next_pending.department,
+            "waiting_for": None
+        }
+
+    return {
+        "can_approve": False,
+        "is_scm_override": False,
+        "is_exports_override": False,
+        "reason": f"Waiting for {next_pending.department} approval first",
+        "current_sequence": next_pending.sequence,
+        "waiting_for": {"department": next_pending.department}
+    }
+
+
 @app.put("/api/orders/{order_id}/approve")
 def approve_order(
     order_id: int,
@@ -1306,7 +1380,7 @@ def approve_order(
     ).order_by(models.OrderApproval.sequence).all()
 
     # Exports Manager Override Path
-    if user_dept == "Exports" and current_user.role == "manager":
+    if user_dept == "Exports":
         exports_pending_approvals = [
             a for a in all_approvals
             if a.status == models.ApprovalStatus.PENDING.value and
@@ -1315,33 +1389,42 @@ def approve_order(
         ]
         
         if not exports_pending_approvals:
-            logging.debug(f"[{current_user.employee_id}] Exports Manager Override: No pending Exports Manager approvals to override.")
+            logging.debug(f"[{current_user.employee_id}] Exports Manager: No pending Exports Manager approvals found.")
             raise HTTPException(
                 status_code=403,
-                detail="No pending Exports Manager approvals found for this order to override."
+                detail="No pending Exports Manager approvals found for this order to approve."
             )
         
         # Find the earliest Exports Manager approval in sequence to act on
         approval_to_act_on = min(exports_pending_approvals, key=lambda x: x.sequence)
-        
-        # Mark with decision and flag it as Exports Manager override
+
+        # Ensure previous approvals before this sequence are completed
+        previous_approvals = [a for a in all_approvals if a.sequence < approval_to_act_on.sequence]
+        for prev in previous_approvals:
+            if prev.status not in [models.ApprovalStatus.APPROVED.value, models.ApprovalStatus.APPROVED_WITH_REMARKS.value]:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Cannot approve: {prev.department} has not approved yet."
+                )
+
+        # Mark with decision
         approval_to_act_on.status = decision_str
-        approval_to_act_on.remarks = f"[Exports Manager Override] {approval_data.remarks.strip() if approval_data.remarks else ''}"
+        approval_to_act_on.remarks = f"{approval_data.remarks.strip() if approval_data.remarks else ''}"
         approval_to_act_on.approver_id = current_user.id
         approval_to_act_on.approved_at = datetime.utcnow()
 
         log_audit(
             db, order_id, current_user.id,
-            f"EXPORTS_MANAGER_OVERRIDE_APPROVAL_SEQ{approval_to_act_on.sequence}",
+            f"EXPORTS_MANAGER_APPROVAL_SEQ{approval_to_act_on.sequence}",
             order.status, order.status,
-            f"Exports Manager overrode {approval_to_act_on.department} approval (seq {approval_to_act_on.sequence}): "
+            f"Exports Manager approved {approval_to_act_on.department} (seq {approval_to_act_on.sequence}): "
             f"{approval_to_act_on.status} - {approval_to_act_on.remarks}",
             request.client.host
         )
 
         check_all_approvals(order, db, current_user.id, request.client.host)
         db.commit()
-        return {"message": f"Exports Manager has overridden the {approval_to_act_on.department} approval successfully."}
+        return {"message": f"Exports Manager has approved {approval_to_act_on.department} successfully."}
 
 
     user_dept_enum = get_user_approval_department(user_dept, all_approvals)
@@ -1375,7 +1458,7 @@ def approve_order(
             logging.debug(f"[{current_user.employee_id}] SCM Override: Approval for target department {approval_data.target_department} not found.")
             raise HTTPException(
                 status_code=404,
-                detail=f"Approval for department \'{approval_data.target_department}\' not found for this order."
+                detail=f"Approval for department \\'{approval_data.target_department}\\' not found for this order."
             )
 
         # Mark with decision and flag it as SCM override
@@ -1423,12 +1506,12 @@ def approve_order(
     ]
 
     if not user_pending_approvals:
-        logging.debug(f"[{current_user.employee_id}] Normal Approval: No pending approval found for user\'s department {user_dept_enum.value}.")
+        logging.debug(f"[{current_user.employee_id}] Normal Approval: No pending approval found for user\\'s department {user_dept_enum.value}.")
         raise HTTPException(
             status_code=403,
             detail="No pending approval found for your department for this order."
         )
-
+    
     # Determine the specific approval to act on
     if user_dept_enum == models.ApprovalDepartment.EXPORTS_MANAGER_INITIAL:
         approval_to_act_on = next(
@@ -1454,7 +1537,11 @@ def approve_order(
     current_sequence = approval_to_act_on.sequence
     previous_approvals = [a for a in all_approvals if a.sequence < current_sequence]
     for prev_approval in previous_approvals:
-        if prev_approval.status not in [models.ApprovalStatus.APPROVED.value, models.ApprovalStatus.APPROVED_WITH_REMARKS.value, models.ApprovalStatus.REJECTED.value]:
+        if prev_approval.status not in [
+            models.ApprovalStatus.APPROVED.value,
+            models.ApprovalStatus.APPROVED_WITH_REMARKS.value,
+            models.ApprovalStatus.REJECTED.value
+        ]:
             logging.debug(f"[{current_user.employee_id}] Normal Approval: Cannot approve due to pending previous approval from {prev_approval.department}.")
             raise HTTPException(
                 status_code=403,
@@ -1464,219 +1551,48 @@ def approve_order(
                 )
             )
 
+    # Apply decision to the identified approval
     approval_to_act_on.status = decision_str
-    approval_to_act_on.remarks = approval_data.remarks
+    approval_to_act_on.remarks = approval_data.remarks.strip() if approval_data.remarks else None
     approval_to_act_on.approver_id = current_user.id
     approval_to_act_on.approved_at = datetime.utcnow()
 
+    # Handle Regulatory specific actions
+    if current_user.department == "Regulatory" and decision_str == models.ApprovalStatus.APPROVED.value:
+        if not approval_data.regulatory_action:
+            raise HTTPException(status_code=400, detail="Regulatory action is required for Regulatory approval.")
+        
+        # Log the specific regulatory action
+        log_audit(
+            db, order_id, current_user.id,
+            f"REGULATORY_ACTION_{approval_data.regulatory_action}",
+            order.status, order.status,
+            f"Regulatory department approved with action: {approval_data.regulatory_action} - {approval_data.remarks or ''}",
+            request.client.host
+        )
+
+        if approval_data.regulatory_action == "SEND_TO_ARTWORK":
+            order.status = models.OrderStatus.PENDING_ARTWORK_PROCESS.value
+        elif approval_data.regulatory_action == "APPROVE_TO_FINANCE":
+            # This will naturally lead to the next approval in check_all_approvals
+            pass # Status update will be handled by check_all_approvals
+    
+    # Log audit for the general approval/rejection
     log_audit(
         db, order_id, current_user.id,
-        f"{user_dept_enum.value}_APPROVAL_SEQ{approval_to_act_on.sequence}",
-        order.status, order.status,
-        f"{user_dept_enum.value} approval (seq {approval_to_act_on.sequence}): {approval_to_act_on.status} - {approval_to_act_on.remarks}",
+        f"ORDER_APPROVAL_SEQ{approval_to_act_on.sequence}",
+        order.status, order.status, # Status might change below in check_all_approvals
+        f"{user_dept_enum.value} department {decision_str.lower()}: {approval_data.remarks or ''}",
         request.client.host
     )
 
-    # After the specific approval is processed, check all approvals to update the overall order status
     check_all_approvals(order, db, current_user.id, request.client.host)
     db.commit()
-    return {"message": "Approval submitted successfully"}
-
-@app.get("/api/orders/{order_id}/can-approve", response_model=CanApproveResponse)
-def can_approve_order(
-    order_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    """Check if current user can approve this order based on sequential workflow.
-    SCM can always approve/reject any pending approval as an override.
-    Exports Manager can approve any pending Exports Manager approval (initial or final) at any time."""
-    logging.debug(f"[{current_user.employee_id}] Checking can_approve for Order ID: {order_id}")
-    logging.debug(f"[{current_user.employee_id}] User Department: {current_user.department}, Role: {current_user.role}")
-    order = db.query(models.Order).filter(models.Order.id == order_id).first()
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    user_dept = current_user.department
-
-    # Fetch all approvals for the order to determine the current step
-    all_approvals = db.query(models.OrderApproval).filter(
-        models.OrderApproval.order_id == order_id
-    ).order_by(models.OrderApproval.sequence).all()
-
-    # Exports Manager Override Path
-    if user_dept == "Exports" and current_user.role == "manager":
-        exports_pending_approvals = [
-            a for a in all_approvals
-            if a.status == models.ApprovalStatus.PENDING.value and
-               (a.department == models.ApprovalDepartment.EXPORTS_MANAGER_INITIAL.value or
-                a.department == models.ApprovalDepartment.EXPORTS_MANAGER_FINAL.value)
-        ]
-        if exports_pending_approvals:
-            # Check if any previous required sequential approvals are still pending for non-Exports Manager steps
-            # This allows Exports Manager to approve their step, even if other steps are skipped or yet to come.
-            # However, if an earlier, non-Exports Manager step is PENDING, we should still indicate that as a blocker
-            # unless the intent is a full override of all prior steps. For now, let's allow "their" step to be approved
-            # if it's pending.
-            
-            # Find the lowest sequence Exports Manager approval that is pending
-            earliest_exports_pending = min(exports_pending_approvals, key=lambda x: x.sequence)
-
-            # Check if any non-Exports Manager approval with lower sequence is still pending.
-            # If so, the Exports Manager can approve their step, but a "waiting_for" might still be shown
-            # for the other department. This needs clarification.
-            # For simplicity, let's assume if any Exports Manager approval is pending, they can approve it.
-            
-            logging.debug(f"[{current_user.employee_id}] Can approve (Exports Manager Override): True, Reason: Exports Manager pending approval found.")
-            return {
-                "can_approve": True,
-                "is_scm_override": False,
-                "is_exports_override": True,
-                "reason": None,
-                "current_sequence": earliest_exports_pending.sequence,
-                "pending_department": earliest_exports_pending.department,
-                "waiting_for": None
-            }
-        logging.debug(f"[{current_user.employee_id}] Can approve (Exports Manager Override): False, Reason: No pending Exports Manager approvals.")
-        logging.debug(f"[{current_user.employee_id}] Can approve (Exports Manager Override): False, Reason: No pending Exports Manager approvals.")
-        return {
-            "can_approve": False,
-            "is_scm_override": False,
-            "is_exports_override": True,
-            "reason": "No pending Exports Manager approvals remaining on this order.",
-            "current_sequence": None,
-            "waiting_for": None
-        }
-
-    # SCM override: can approve any pending approval
-    if user_dept == "SCM":
-        pending = [a for a in all_approvals if a.status == models.ApprovalStatus.PENDING.value]
-        if pending:
-            logging.debug(f"[{current_user.employee_id}] Can approve (SCM Override): True, Reason: Pending approval found for SCM override.")
-            logging.debug(f"[{current_user.employee_id}] Can approve (SCM Override): True, Reason: Pending approval found for SCM override.")
-            return {
-                "can_approve": True,
-                "is_scm_override": True,
-                "is_exports_override": False,
-                "reason": None,
-                "current_sequence": pending[0].sequence,
-                "pending_department": pending[0].department,
-                "waiting_for": None
-            }
-        logging.debug(f"[{current_user.employee_id}] Can approve (SCM Override): False, Reason: No pending approvals for SCM override.")
-        logging.debug(f"[{current_user.employee_id}] Can approve (SCM Override): False, Reason: No pending approvals for SCM override.")
-        return {
-            "can_approve": False,
-            "is_scm_override": True,
-            "is_exports_override": False,
-            "reason": "No pending approvals remaining on this order.",
-            "current_sequence": None,
-            "waiting_for": None
-        }
-
-    # Convert department strings to ApprovalDepartment enum members for easier comparison
-    user_dept_enum = get_user_approval_department(user_dept, all_approvals)
-    
-    # If the user's department is not recognized in the enum and it's not SCM, then they cannot approve.
-    if user_dept_enum is None:
-        logging.debug(f"[{current_user.employee_id}] Can approve: False, Reason: Department not in workflow.")
-        return {
-            "can_approve": False,
-            "is_scm_override": False,
-            "is_exports_override": False,
-            "reason": "Your department is not part of the defined approval workflow.",
-            "current_sequence": None,
-            "waiting_for": None
-        }
-
-    if user_dept_enum in [models.ApprovalDepartment.EXPORTS_MANAGER_INITIAL, models.ApprovalDepartment.EXPORTS_MANAGER_FINAL] and current_user.role != "manager":
-        logging.debug(f"[{current_user.employee_id}] Can approve: False, Reason: Not Exports Manager.")
-        return {
-            "can_approve": False,
-            "is_scm_override": False,
-            "is_exports_override": False,
-            "reason": "Only Export Manager can approve Exports approvals",
-            "current_sequence": None,
-            "waiting_for": None
-        }
-
-    user_pending_approvals = [
-        a for a in all_approvals 
-        if a.status == models.ApprovalStatus.PENDING.value and a.department == user_dept_enum.value
-    ]
-
-    if not user_pending_approvals:
-        logging.debug(f"[{current_user.employee_id}] Can approve: False, Reason: No pending approval for user's department.")
-        return {
-            "can_approve": False,
-            "is_scm_override": False,
-            "is_exports_override": False,
-            "reason": "No pending approval found for your department for this order.",
-            "current_sequence": None,
-            "waiting_for": None
-        }
-    
-    # Determine the specific approval to act on (same logic as approve_order endpoint)
-    if user_dept_enum == models.ApprovalDepartment.EXPORTS_MANAGER_INITIAL:
-        approval_to_check = next(
-            (a for a in user_pending_approvals if a.department == models.ApprovalDepartment.EXPORTS_MANAGER_INITIAL.value),
-            None
-        )
-    elif user_dept_enum == models.ApprovalDepartment.EXPORTS_MANAGER_FINAL:
-        approval_to_check = next(
-            (a for a in user_pending_approvals if a.department == models.ApprovalDepartment.EXPORTS_MANAGER_FINAL.value),
-            None
-        )
-    else:
-        approval_to_check = user_pending_approvals[0]
-
-    if not approval_to_check:
-        logging.debug(f"[{current_user.employee_id}] Can approve: False, Reason: No pending approval for specific role in department.")
-        return {
-            "can_approve": False,
-            "is_scm_override": False,
-            "is_exports_override": False,
-            "reason": "No pending approval found for your specific role in this department.",
-            "current_sequence": None,
-            "waiting_for": None
-        }
-
-    current_sequence = approval_to_check.sequence
-    previous_approvals = [a for a in all_approvals if a.sequence < current_sequence]
-    for prev_approval in previous_approvals:
-        if prev_approval.status not in [
-            models.ApprovalStatus.APPROVED.value,
-            models.ApprovalStatus.APPROVED_WITH_REMARKS.value,
-            models.ApprovalStatus.REJECTED.value
-        ]:
-            logging.debug(f"[{current_user.employee_id}] Can approve: False, Reason: Previous approval not complete. Waiting for {prev_approval.department}.")
-            return {
-                "can_approve": False,
-                "is_scm_override": False,
-                "is_exports_override": False,
-                "reason": (
-                    f"Waiting for {prev_approval.department} (sequence {prev_approval.sequence}) "
-                    f"has not approved yet. Current status: {prev_approval.status}"
-                ),
-                "current_sequence": current_sequence,
-                "waiting_for": {
-                    "department": prev_approval.department,
-                    "sequence": prev_approval.sequence,
-                    "status": prev_approval.status
-                }
-            }
-        logging.debug(f"[{current_user.employee_id}] Can approve: False, Reason: Previous approval not complete. Waiting for {prev_approval.department}.")
+    return {"message": f"{user_dept_enum.value} has {decision_str.lower()} the order successfully."}
 
     logging.debug(f"[{current_user.employee_id}] Can approve: True, Reason: All checks passed.")
-    return {
-        "can_approve": True,
-        "is_scm_override": False,
-        "is_exports_override": False,
-        "reason": None,
-        "current_sequence": current_sequence,
-        "waiting_for": None
-    }
-    logging.debug(f"[{current_user.employee_id}] Can approve: True, Reason: All checks passed.")
+    return {"can_approve": True, "is_scm_override": False, "is_exports_override": False, "reason": None, "current_sequence": current_sequence, "waiting_for": None}
+
 
 def check_all_approvals(order: models.Order, db: Session, user_id: int, ip_address: Optional[str]):
     """Check if all departments have approved and update order status accordingly"""
@@ -1724,7 +1640,7 @@ def check_all_approvals(order: models.Order, db: Session, user_id: int, ip_addre
 
     if prev_order_status != order.status:
         log_audit(db, order.id, user_id, "ORDER_STATUS_CHANGE", prev_order_status, order.status,
-                  f"Order status updated due to approval process: {prev_order_status} -> {order.status}", ip_address)
+                  f"Status updated due to approval process: {prev_order_status} -> {order.status}", ip_address)
 
 @app.put("/api/orders/{order_id}/milestone/{milestone_name}")
 def update_milestone(
@@ -1748,7 +1664,7 @@ def update_milestone(
         raise HTTPException(status_code=404, detail="Milestone not found")
 
     user_dept = current_user.department
-    print(f"DEBUG: User Department: {user_dept}, Milestone Category: {milestone.category}")
+    print(f"DEBUG: User Department: {current_user.department}, Milestone Category: {milestone.category}")
 
     # Authorization logic for milestone updates
     if milestone.category == "Logistics" and user_dept != "Regulatory":
@@ -1763,7 +1679,6 @@ def update_milestone(
         )
     elif milestone.category not in ["Logistics", "SCM"]:
         # For other categories, we might need a more general rule or explicit denials.
-        # For now, deny if not SCM or Exports for Logistics/SCM respectively.
         # This implicitly denies updates for categories not explicitly handled.
         raise HTTPException(
             status_code=403,
@@ -1813,6 +1728,51 @@ def update_milestone(
     db.commit()
     return {"message": "Milestone updated successfully"}
 
+@app.get("/api/milestones/{milestone_id}/history", response_model=List[schemas.MilestoneHistoryResponse])
+def get_milestone_history(
+    milestone_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # Check if the milestone itself exists
+    milestone_exists = db.query(models.Milestone).filter(models.Milestone.id == milestone_id).first()
+    if not milestone_exists:
+        raise HTTPException(status_code=404, detail="Milestone not found")
+
+    history_entries = db.query(models.MilestoneHistory).options(
+        joinedload(models.MilestoneHistory.changed_by_user)
+    ).filter(models.MilestoneHistory.milestone_id == milestone_id).order_by(models.MilestoneHistory.changed_at.desc()).all()
+    # Explicitly construct MilestoneHistoryResponse objects
+    response_history = []
+    for entry in history_entries:
+        user_response = None
+        if entry.changed_by_user:
+            user_response = schemas.UserResponse(
+                id=entry.changed_by_user.id,
+                employee_id=entry.changed_by_user.employee_id,
+                name=entry.changed_by_user.name,
+                email=entry.changed_by_user.email,
+                department=entry.changed_by_user.department,
+                role=entry.changed_by_user.role,
+                is_active=entry.changed_by_user.is_active,
+                created_at=entry.changed_by_user.created_at,
+                last_login=entry.changed_by_user.last_login,
+                order_type=entry.changed_by_user.order_type
+            )
+
+        response_history.append(
+            schemas.MilestoneHistoryResponse(
+                id=entry.id,
+                milestone_id=entry.milestone_id,
+                change_type=entry.change_type,
+                old_value=entry.old_value,
+                new_value=entry.new_value,
+                changed_by_user=user_response,
+                changed_at=entry.changed_at,
+            )
+        )
+    return response_history
+
 @app.put("/api/milestones/{milestone_id}")
 def update_milestone_by_id(
     milestone_id: int,
@@ -1860,6 +1820,9 @@ def update_milestone_by_id(
             milestone.status = "DELAYED"
             create_delay_alert(order, milestone, db)
 
+    # The prev_order_status is local to this function, so define it here
+    # This was the fix for the problem: [Pyrefly Error] 1779 |     if prev_order_status != order.status: : Could not find name `prev_order_status`
+    prev_order_status_for_milestone_update = order.status # Define the variable here
     update_order_status_from_milestones(order, db, current_user.id, request.client.host)
 
     log_audit(
@@ -1955,8 +1918,8 @@ def update_order_status_from_milestones(order: models.Order, db: Session, user_i
         order.status = "AT RISK"
     
     if prev_status != order.status:
-        log_audit(db, order.id, user_id, "STATUS_CHANGE", prev_status, order.status,
-                  f"Status updated based on milestone progress", ip_address)
+        log_audit(db, order.id, user_id, "ORDER_STATUS_CHANGE", prev_status, order.status,
+                  f"Status updated due to approval process: {prev_status} -> {order.status}", ip_address)
 
 # ==================== ALERTS ====================
 
@@ -2010,108 +1973,106 @@ def get_dashboard(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    user_dept = current_user.department
-    stats = schemas.DashboardStats()
-    
-    if user_dept == "Exports":
-        stats.new_orders = db.query(models.Order).filter(models.Order.status == models.OrderStatus.REGULATORY_CREATED.value).count()
-        stats.pending_approval = db.query(models.Order).filter(models.Order.status == models.OrderStatus.PENDING_EXPORTS_MANAGER_APPROVAL.value).count() # New: Pending Exports Manager Approval
-        stats.accepted = db.query(models.Order).filter(models.Order.status == models.OrderStatus.ORDER_FINALIZED.value).count()
-        stats.in_execution = db.query(models.Order).filter(
-            models.Order.status.in_([models.OrderStatus.IN_EXECUTION.value, models.OrderStatus.AT_RISK.value])
-        ).count()
-        stats.ready_shipment = db.query(models.Order).filter(models.Order.status == models.OrderStatus.READY_FOR_SHIPMENT.value).count()
-        stats.shipped = db.query(models.Order).filter(models.Order.status == models.OrderStatus.SHIPPED.value).count()
-        stats.delivered = db.query(models.Order).filter(models.Order.status == models.OrderStatus.DELIVERED.value).count()
-        stats.at_risk = db.query(models.Order).filter(models.Order.status == models.OrderStatus.AT_RISK.value).count()
-    
-    elif user_dept == "Regulatory":
-        # Expiring registrations (within 90 days)
-        expiry_date = date.today() + timedelta(days=90)
-        stats.expiring_registrations = db.query(models.Registration).filter(
-            models.Registration.registration_expiry_date <= expiry_date,
-            models.Registration.registration_status == "Active"
-        ).count()
-        stats.missing_certificates = db.query(models.Registration).filter(
-            models.Registration.certificate_path == None
-        ).count()
-        stats.pending_approvals = db.query(models.OrderApproval).filter(
-            models.OrderApproval.department == models.ApprovalDepartment.REGULATORY.value,
-            models.OrderApproval.status == models.ApprovalStatus.PENDING.value
-        ).count()
-    
-    elif user_dept == "Artwork":
-        stats.pending_approvals = db.query(models.OrderApproval).filter(
-            models.OrderApproval.department == models.ApprovalDepartment.ARTWORK.value,
-            models.OrderApproval.status == models.ApprovalStatus.PENDING.value
-        ).count()
-        stats.new_orders = db.query(models.Order).filter(
-            models.Order.status == models.OrderStatus.PENDING_ARTWORK_PROCESS.value
-        ).count()
-    
-    elif user_dept == "SCM":
-        stats.pending_approvals = db.query(models.OrderApproval).filter(
-            models.OrderApproval.department == "SCM",
-            models.OrderApproval.status == "PENDING"
-        ).count()
-    
-    elif user_dept == "Finance":
-        stats.pending_approvals = db.query(models.OrderApproval).filter(
-            models.OrderApproval.department == models.ApprovalDepartment.FINANCE.value,
-            models.OrderApproval.status == models.ApprovalStatus.PENDING.value
-        ).count()
-    
-    elif user_dept == "Management":
-        stats.open_orders = db.query(models.Order).filter(
-            ~models.Order.status.in_(["DELIVERED", "CANCELLED"])
-        ).count()
-        stats.at_risk = db.query(models.Order).filter(models.Order.status == "AT RISK").count()
-        stats.delayed = db.query(models.Order).filter(models.Order.status == "DELAYED").count()
-        
-        # On-time delivery calculation
-        delivered_orders = db.query(models.Order).filter(models.Order.status == "DELIVERED").all()
-        on_time_count = sum(1 for o in delivered_orders 
-                           if o.delivered_at and o.delivered_at.date() <= o.requested_delivery_date)
-        stats.on_time_deliveries = on_time_count
-        stats.total_delivered = len(delivered_orders)
-        
-        stats.compliance_issues = db.query(models.Order).filter(
-            models.Order.compliance_status == "FAILED"
-        ).count()
-    
-    # Recent orders
-    recent_orders = db.query(models.Order).options(
-        joinedload(models.Order.customer),
-        joinedload(models.Order.product),
-        joinedload(models.Order.country)
-    ).order_by(models.Order.created_at.desc()).limit(10).all()
+    # Get total new orders
+    # This part should be implemented based on your definition of "new orders"
+    # For example, orders created in the last 24 hours.
+    # For demonstration, let's assume 0 for now.
+    new_orders_count = db.query(models.Order).filter(models.Order.created_at >= (datetime.utcnow() - timedelta(days=1))).count()
 
-    
-    # Unread alerts
-    alerts = db.query(models.Alert).filter(
-        models.Alert.department == user_dept,
-        models.Alert.is_read == False
-    ).order_by(models.Alert.created_at.desc()).limit(5).all()
-    
-    return schemas.DashboardData(
-        stats=stats,
-        recent_orders=recent_orders,
-        alerts=alerts
+    # Get total pending approval orders (any status that indicates pending approval)
+    pending_approval_count = db.query(models.Order).filter(
+        models.Order.status.in_([
+            models.OrderStatus.PENDING_EXPORTS_MANAGER_APPROVAL.value,
+            models.OrderStatus.PENDING_REGULATORY_REVISION.value,
+            models.OrderStatus.PENDING_ARTWORK_PROCESS.value,
+            models.OrderStatus.PENDING_FINANCE_APPROVAL.value,
+            models.OrderStatus.PENDING_FINAL_EXPORTS_CHECK.value,
+            models.OrderStatus.HOLD.value # Assuming HOLD also counts as pending action/approval
+        ])
+    ).count()
+
+    # Get total accepted orders
+    accepted_count = db.query(models.Order).filter(models.Order.status == models.OrderStatus.ORDER_FINALIZED.value).count()
+
+    # Get total in execution orders
+    in_execution_count = db.query(models.Order).filter(models.Order.status == models.OrderStatus.IN_EXECUTION.value).count()
+
+    # Get total ready for shipment orders
+    ready_shipment_count = db.query(models.Order).filter(models.Order.status == models.OrderStatus.READY_FOR_SHIPMENT.value).count()
+
+    # Get total shipped orders
+    shipped_count = db.query(models.Order).filter(models.Order.status == models.OrderStatus.SHIPPED.value).count()
+
+    # Get total delivered orders
+    delivered_count = db.query(models.Order).filter(models.Order.status == models.OrderStatus.DELIVERED.value).count()
+
+    # Get total at risk orders
+    at_risk_count = db.query(models.Order).filter(models.Order.status == models.OrderStatus.AT_RISK.value).count()
+
+    # Get expiring registrations (e.g., expiring in next 30 days)
+    expiring_registrations_count = db.query(models.Registration).filter(
+        models.Registration.registration_expiry_date <= (date.today() + timedelta(days=30)),
+        models.Registration.registration_expiry_date >= date.today(),
+        models.Registration.registration_status == "Active"
+    ).count()
+
+    # Get missing certificates (registrations without certificate path)
+    missing_certificates_count = db.query(models.Registration).filter(
+        models.Registration.certificate_path == None
+    ).count()
+
+    # Assuming `open_orders` could be anything not finalized or rejected
+    open_orders_count = db.query(models.Order).filter(
+        models.Order.status.notin_([
+            models.OrderStatus.ORDER_FINALIZED.value,
+            models.OrderStatus.REJECTED.value
+        ])
+    ).count()
+
+    # Assuming `delayed` refers to orders with delayed milestones
+    delayed_count = db.query(models.Order).filter(models.Order.status == models.OrderStatus.AT_RISK.value).count()
+
+    # Placeholder for on-time deliveries, needs more complex logic to determine
+    on_time_deliveries_count = 0 # Currently not implemented
+    total_delivered_count = delivered_count # Re-using delivered count for this
+
+    # Compliance issues are tracked via alerts, so count compliance issue alerts
+    compliance_issues_count = db.query(models.Alert).filter(models.Alert.alert_type == "COMPLIANCE_ISSUE").count()
+
+    stats = schemas.DashboardStats(
+        new_orders=new_orders_count,
+        pending_approval=pending_approval_count,
+        accepted=accepted_count,
+        in_execution=in_execution_count,
+        ready_shipment=ready_shipment_count,
+        shipped=shipped_count,
+        delivered=delivered_count,
+        at_risk=at_risk_count,
+        expiring_registrations=expiring_registrations_count,
+        missing_certificates=missing_certificates_count,
+        pending_approvals=pending_approval_count, # Re-using pending_approval_count
+        open_orders=open_orders_count,
+        delayed=delayed_count,
+        on_time_deliveries=on_time_deliveries_count,
+        total_delivered=total_delivered_count,
+        compliance_issues=compliance_issues_count
     )
 
-@app.get("/api/milestones/{milestone_id}/history", response_model=List[schemas.MilestoneHistoryResponse])
-def get_milestone_history(
-    milestone_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    history = db.query(models.MilestoneHistory).options(joinedload(models.MilestoneHistory.changed_by_user)).filter(
-        models.MilestoneHistory.milestone_id == milestone_id
-    ).order_by(models.MilestoneHistory.changed_at.desc()).all()
-    return history
+    # Fetch recent orders (e.g., last 5 updated orders)
+    recent_orders_query = db.query(models.Order)
+    if current_user.department == "SCM" and getattr(current_user, 'order_type', None):
+        recent_orders_query = recent_orders_query.join(models.Order.product)
+        if current_user.order_type == "PP":
+            recent_orders_query = recent_orders_query.filter((models.Product.category == "PP") | (models.Product.category == "ALL"))
+        elif current_user.order_type == "PNS":
+            recent_orders_query = recent_orders_query.filter((models.Product.category == "PNS") | (models.Product.category == "ALL"))
 
-# ==================== INITIALIZATION ====================
+    recent_orders = recent_orders_query.order_by(models.Order.updated_at.desc()).limit(5).all()
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, timeout_keep_alive=600, log_level="debug")
+    # Fetch alerts for the current user's department
+    alerts = db.query(models.Alert).filter(
+        models.Alert.department == current_user.department,
+        models.Alert.is_read == False
+    ).order_by(models.Alert.created_at.desc()).limit(5).all()
+
+    return schemas.DashboardData(stats=stats, recent_orders=recent_orders, alerts=alerts)

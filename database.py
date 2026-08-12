@@ -11,13 +11,16 @@ SSL_CA = os.getenv("MYSQL_SSL_CA")
 
 engine = create_engine(
     DATABASE_URL,
+    pool_size=10,
+    max_overflow=20,
+    pool_recycle=1800,
     pool_pre_ping=True,
-    pool_timeout=10, # Add a timeout for getting a connection from the pool
+    pool_timeout=10,
     connect_args={
         "ssl": {
             "ca": SSL_CA
         },
-        "connect_timeout": 10 # Add a connection timeout
+        "connect_timeout": 10
     }
 )
 
