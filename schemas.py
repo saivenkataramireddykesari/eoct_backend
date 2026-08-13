@@ -200,7 +200,7 @@ class CustomerBase(BaseModel):
     country_id: int
 
     payment_terms: Optional[str] = None
-    agreement_status: str = "Pending"
+    agreement_status: Optional[str] = "Pending"
     agreement_validity: Optional[date] = None
 
 class CustomerCreate(CustomerBase):
