@@ -160,7 +160,6 @@ class SearchSuggestionsResponse(BaseModel):
 
 # Registration Schemas
 class RegistrationBase(BaseModel):
-    country_id: int
     sku: str
     registration_number: str
     registration_status: str = "Active"
@@ -168,11 +167,21 @@ class RegistrationBase(BaseModel):
     registration_expiry_date: Optional[date] = None
     remarks: Optional[str] = None
 
+    @validator('registration_issue_date', 'registration_expiry_date', pre=True)
+    def parse_optional_date(cls, value):
+        if value == '':
+            return None
+        return value
+
+class RegistrationCreateRequest(RegistrationBase):
+    country: str # Country name from frontend
+
 class RegistrationCreate(RegistrationBase):
-    pass
+    country_id: int # Country ID for internal use
 
 class RegistrationResponse(RegistrationBase):
     id: int
+    country_id: int # Add country_id to response as it's part of the model
     certificate_path: Optional[str] = None
     is_active: bool
     created_at: Optional[datetime] = None

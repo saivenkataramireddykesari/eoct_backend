@@ -175,6 +175,7 @@ class Order(Base):
     free_quantity = Column(Integer, default=0)
     quantity = Column(Integer, nullable=False)  # total = sales + free
     requested_delivery_date = Column(Date, nullable=False)
+    order_type = Column(String(20), nullable=True, default="PNS")
     shipping_terms = Column(String(100))
     import_license_required = Column(Boolean, default=False)
     import_license_validity = Column(Date)

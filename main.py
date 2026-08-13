@@ -2,6 +2,7 @@ from typing import List
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import date, datetime, timedelta
@@ -17,7 +18,7 @@ import schemas
 import auth
 from database import engine, get_db, SessionLocal
 from auth import get_current_user, authenticate_user, create_access_token, get_password_hash
-from schemas import CanApproveResponse, CountryListResponse, ProductCreate, ProductSearchResponse, ProductSearchItem, Country, CustomerResponse, SearchSuggestionsResponse, SearchSuggestion
+from schemas import CanApproveResponse, CountryListResponse, ProductCreate, ProductSearchResponse, ProductSearchItem, Country, CustomerResponse, SearchSuggestionsResponse, SearchSuggestion, RegistrationCreateRequest
 
 
 # Create database tables
@@ -626,6 +627,45 @@ def decide_pm_code(
 
 # ==================== MASTER DATA - REGISTRATIONS ====================
 
+@app.post("/api/registrations", response_model=schemas.RegistrationResponse)
+def create_registration(
+    registration_request: schemas.RegistrationCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # Find the country by name
+    country = db.query(models.Country).filter(models.Country.name == registration_request.country).first()
+    if not country:
+        raise HTTPException(status_code=404, detail=f"Country '{registration_request.country}' not found")
+
+    # Check if a registration for this country and SKU already exists
+    existing_registration = db.query(models.Registration).filter(
+        models.Registration.country_id == country.id,
+        models.Registration.sku == registration_request.sku
+    ).first()
+
+    if existing_registration:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Registration for SKU '{registration_request.sku}' already exists in {registration_request.country}"
+        )
+    
+    # Create the registration with the resolved country_id
+    db_registration = models.Registration(
+        country_id=country.id,
+        sku=registration_request.sku,
+        registration_number=registration_request.registration_number,
+        registration_status=registration_request.registration_status,
+        registration_issue_date=registration_request.registration_issue_date,
+        registration_expiry_date=registration_request.registration_expiry_date,
+        remarks=registration_request.remarks
+    )
+
+    db.add(db_registration)
+    db.commit()
+    db.refresh(db_registration)
+    return db_registration
+
 @app.get("/api/registrations", response_model=List[schemas.RegistrationResponse])
 def get_registrations(
     skip: int = 0,
@@ -1033,39 +1073,271 @@ def get_user_approval_department(
                 return ad
     return None
 
+
 @app.get("/api/orders", response_model=List[schemas.OrderResponse])
 def get_orders(
     skip: int = 0,
     limit: int = 20,
     status: Optional[str] = None,
+    product_type: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    """
+    Get orders based on the logged-in user's department.
+
+    SCM:
+        PNS user -> orders.order_type = PNS
+        PP user  -> orders.order_type = PP
+
+    Artwork:
+        Only pending artwork orders.
+
+    product_type:
+        Filters orders.category.
+    """
+
+    logging.debug("=" * 70)
+    logging.debug("GET ORDERS")
+    logging.debug(
+        f"Employee       : {current_user.employee_id}"
+    )
+    logging.debug(
+        f"Department     : {current_user.department}"
+    )
+    logging.debug(
+        f"Role           : {current_user.role}"
+    )
+    logging.debug(
+        f"SCM Order Type : "
+        f"{getattr(current_user, 'order_type', None)}"
+    )
+    logging.debug(
+        f"Product Type   : {product_type}"
+    )
+    logging.debug(
+        f"Status         : {status}"
+    )
+    logging.debug("=" * 70)
+
+    # ============================================================
+    # BASE QUERY
+    # ============================================================
+
     query = db.query(models.Order).options(
         joinedload(models.Order.customer),
         joinedload(models.Order.product),
         joinedload(models.Order.country),
-        selectinload(models.Order.approvals).joinedload(models.OrderApproval.approver),
+
+        selectinload(
+            models.Order.approvals
+        ).joinedload(
+            models.OrderApproval.approver
+        ),
+
         selectinload(models.Order.milestones),
         selectinload(models.Order.alerts)
     )
 
-    # Filter for Artwork department: only show orders that are pending artwork process
-    if current_user.department == "Artwork":
-        query = query.filter(models.Order.status == models.OrderStatus.PENDING_ARTWORK_PROCESS.value)
-        
-    # Filter for SCM department based on order_type
-    if current_user.department == "SCM" and getattr(current_user, 'order_type', None):
-        query = query.join(models.Order.product)
-        if current_user.order_type == "PP":
-            query = query.filter((models.Product.category == "PP") | (models.Product.category == "ALL"))
-        elif current_user.order_type == "PNS":
-            query = query.filter((models.Product.category == "PNS") | (models.Product.category == "ALL"))
-    
-    if status:
-        query = query.filter(models.Order.status == status)
+    # ============================================================
+    # ARTWORK FILTER
+    # ============================================================
 
-    orders = query.order_by(models.Order.created_at.desc()).offset(skip).limit(limit).all()
+    if current_user.department == "Artwork":
+
+        logging.debug(
+            f"Artwork user {current_user.employee_id} "
+            f"-> showing pending artwork orders"
+        )
+
+        query = query.filter(
+            models.Order.status ==
+            models.OrderStatus.PENDING_ARTWORK_PROCESS.value
+        )
+
+    # ============================================================
+    # PRODUCT TYPE FILTER
+    # ============================================================
+
+    if product_type:
+
+        requested_type = (
+            product_type
+            .strip()
+            .upper()
+        )
+
+        logging.debug(
+            f"Product category filter -> "
+            f"{requested_type}"
+        )
+
+        # Product Type means the Order.category value.
+        #
+        # Example:
+        # Drug
+        # Nutra
+        #
+        # It is NOT PNS / PP.
+
+        query = query.filter(
+            func.upper(
+                func.trim(
+                    models.Order.category
+                )
+            ) == requested_type
+        )
+
+    # ============================================================
+    # SCM FILTER
+    # ============================================================
+
+    elif current_user.department == "SCM":
+
+        scm_type = (
+            getattr(
+                current_user,
+                "order_type",
+                None
+            ) or ""
+        ).strip().upper()
+
+        logging.debug(
+            f"SCM filter -> "
+            f"employee={current_user.employee_id}, "
+            f"SCM order_type={repr(scm_type)}"
+        )
+
+        # --------------------------------------------------------
+        # PNS SCM
+        # --------------------------------------------------------
+
+        if scm_type == "PNS":
+
+            logging.debug(
+                f"SCM PNS user "
+                f"{current_user.employee_id} "
+                f"-> filtering Order.order_type = PNS"
+            )
+
+            query = query.filter(
+                func.upper(
+                    func.trim(
+                        models.Order.order_type
+                    )
+                ) == "PNS"
+            )
+
+        # --------------------------------------------------------
+        # PP SCM
+        # --------------------------------------------------------
+
+        elif scm_type == "PP":
+
+            logging.debug(
+                f"SCM PP user "
+                f"{current_user.employee_id} "
+                f"-> filtering Order.order_type = PP"
+            )
+
+            query = query.filter(
+                func.upper(
+                    func.trim(
+                        models.Order.order_type
+                    )
+                ) == "PP"
+            )
+
+        # --------------------------------------------------------
+        # INVALID SCM TYPE
+        # --------------------------------------------------------
+
+        else:
+
+            logging.warning(
+                f"Invalid SCM order_type for "
+                f"{current_user.employee_id}: "
+                f"{repr(scm_type)}"
+            )
+
+            # Never expose all orders when SCM type
+            # is missing or invalid.
+
+            query = query.filter(False)
+
+    # ============================================================
+    # STATUS FILTER
+    # ============================================================
+
+    if status:
+
+        requested_status = status.strip()
+
+        logging.debug(
+            f"Status filter -> "
+            f"{requested_status}"
+        )
+
+        query = query.filter(
+            models.Order.status == requested_status
+        )
+
+    # ============================================================
+    # FETCH ORDERS
+    # ============================================================
+
+    logging.debug("=" * 70)
+    logging.debug("FINAL ORDER QUERY")
+    logging.debug(
+        f"Employee       : {current_user.employee_id}"
+    )
+    logging.debug(
+        f"Department     : {current_user.department}"
+    )
+    logging.debug(
+        f"SCM Order Type : "
+        f"{getattr(current_user, 'order_type', None)}"
+    )
+    logging.debug(
+        f"Product Type   : {product_type}"
+    )
+    logging.debug(
+        f"Status         : {status}"
+    )
+    logging.debug("=" * 70)
+
+    orders = (
+        query
+        .order_by(
+            models.Order.created_at.desc()
+        )
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    # ============================================================
+    # DEBUG RESULTS
+    # ============================================================
+
+    logging.debug(
+        f"Orders returned for "
+        f"{current_user.employee_id}: "
+        f"{len(orders)}"
+    )
+
+    for order in orders:
+
+        logging.debug(
+            f"ORDER -> "
+            f"id={order.id}, "
+            f"order_id={order.order_id}, "
+            f"order_type={getattr(order, 'order_type', None)}, "
+            f"category={getattr(order, 'category', None)}, "
+            f"sku={order.sku}, "
+            f"status={order.status}"
+        )
+
     return orders
 
 
