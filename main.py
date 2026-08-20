@@ -1,9 +1,3 @@
-from typing import List
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer
-from sqlalchemy import func
-from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import date, datetime, timedelta
 import uuid
@@ -13,12 +7,20 @@ import logging
 from time import perf_counter
 import traceback
 from sqlalchemy.orm import relationship, joinedload, selectinload
+from sqlalchemy import func, or_, cast, String # Import or_, cast, String for search conditions
+
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer
+from sqlalchemy.orm import Session
+
 import models
 import schemas
 import auth
+from schemas import ProductPMCodeUpdate
 from database import engine, get_db, SessionLocal
 from auth import get_current_user, authenticate_user, create_access_token, get_password_hash
-from schemas import CanApproveResponse, CountryListResponse, ProductCreate, ProductSearchResponse, ProductSearchItem, Country, CustomerResponse, SearchSuggestionsResponse, SearchSuggestion, RegistrationCreateRequest
+from schemas import CanApproveResponse, CountryListResponse, ProductCreate, ProductSearchResponse, ProductSearchItem, Country, CustomerResponse, SearchSuggestionsResponse, SearchSuggestion, RegistrationCreateRequest, FullSearchResultItem, FullSearchResponse
 
 
 # Create database tables
@@ -196,25 +198,6 @@ def get_products(
         joinedload(models.Product.country)
     )
 
-    if current_user.department == "SCM" and current_user.order_type:
-        order_type_to_use = current_user.order_type
-        if order_type_to_use == "PP":
-            query = query.filter(
-                (models.Product.category == "PP") | (models.Product.category == "ALL")
-            )
-        elif current_user.order_type == "PNS":
-            query = query.filter(
-                (models.Product.category == "PNS") | (models.Product.category == "ALL")
-            )
-    elif scm_user_type:
-        if scm_user_type.lower() == "pp":
-            query = query.filter(
-                (models.Product.category == "PP") | (models.Product.category == "ALL")
-            )
-        elif scm_user_type.lower() == "pns":
-            query = query.filter(
-                (models.Product.category == "PNS") | (models.Product.category == "ALL")
-            )
 
     products = query.offset(skip).limit(limit).all()
     return products
@@ -242,6 +225,21 @@ def create_product(
     db.commit()
     db.refresh(db_product)
     return db_product
+
+
+@app.get("/api/products/detail/{product_id}", response_model=schemas.ProductResponse)
+def get_product_detail(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    product = db.query(models.Product).options(
+        joinedload(models.Product.country),
+        joinedload(models.Product.pm_code_requests).joinedload(models.PMCodeRequest.transactions)
+    ).filter(models.Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return product
 
 
 @app.put("/api/products/{product_id}", response_model=schemas.ProductResponse)
@@ -274,7 +272,6 @@ def update_product(
 
 @app.get("/api/products/check-duplicate")
 def check_duplicate_product(
-    category: str,
     country_name: str,
     customer: str,
     pack_size: str,
@@ -285,7 +282,7 @@ def check_duplicate_product(
         return {"is_duplicate": False}
     
     existing = db.query(models.Product).filter(
-        models.Product.category == category,
+
         models.Product.country_id == country.id,
         models.Product.customer == customer,
         models.Product.pack_size == pack_size
@@ -332,7 +329,7 @@ def search_products(
     products = db.query(models.Product).options(joinedload(models.Product.country)).filter(
         models.Product.sku_code.ilike(search_query) |
         models.Product.product_name.ilike(search_query) |
-        models.Product.category.ilike(search_query) |
+
         models.Product.customer.ilike(search_query) |
         (models.Product.country.has(models.Country.name.ilike(search_query)))
     ).limit(10).all()
@@ -366,22 +363,6 @@ def get_product_by_sku(
         raise HTTPException(status_code=404, detail="Product not found")
     return product
 
-    
-@app.get("/api/products/sku/{sku_code}", response_model=schemas.ProductResponse)
-def get_product_by_sku(
-    sku_code: str,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user) # Keep authentication for now
-):
-    """Retrieve a single product by its SKU code."""
-    print(f"DEBUG: Attempting to fetch product with SKU: {sku_code}")
-    product = db.query(models.Product).options(joinedload(models.Product.country)).filter(models.Product.sku_code == sku_code).first()
-    if product:
-        print(f"DEBUG: Found product: {product.product_name} ({product.sku_code})")
-    else:
-        print(f"DEBUG: Product with SKU: {sku_code} not found in DB.")
-        raise HTTPException(status_code=404, detail="Product not found")
-    return product
 
 
 @app.get("/api/products/filtered", response_model=List[schemas.ProductResponse])
@@ -423,7 +404,7 @@ def get_skus_by_country(
         models.Product.is_active == True
     ).order_by(models.Product.product_name).all()
     
-    return [schemas.ProductSearchItem(sku_code=p.sku_code, product_name=p.product_name, product_category=p.category) for p in products]
+    return [schemas.ProductSearchItem(sku_code=p.sku_code, product_name=p.product_name) for p in products]
 
 @app.get("/api/search/suggestions", response_model=schemas.SearchSuggestionsResponse)
 def get_search_suggestions(
@@ -435,35 +416,154 @@ def get_search_suggestions(
     if not query:
         return {"suggestions": []}
 
-    # Example: Product search suggestions
-    products = db.query(models.Product).filter(
-        (models.Product.product_name.ilike(f"%{query}%")) | 
-        (models.Product.sku_code.ilike(f"%{query}%"))
+    search_pattern = f"%{query.lower()}%"
+
+    # Product search suggestions
+    products = db.query(models.Product).options(joinedload(models.Product.country)).filter(
+        or_(
+            func.lower(models.Product.sku_code).like(search_pattern),
+            func.lower(models.Product.product_name).like(search_pattern),
+            func.lower(models.Product.category).like(search_pattern),
+            func.lower(models.Product.customer).like(search_pattern),
+            cast(models.Product.id, String).like(search_pattern)
+        )
     ).limit(5).all()
     for p in products:
-        suggestions.append(schemas.SearchSuggestion(type="product", id=p.sku_code, name=p.product_name))
+        suggestions.append(schemas.SearchSuggestion(type="product", id=str(p.id), name=f"{p.product_name} ({p.sku_code})"))
 
-    # Example: Customer search suggestions
-    customers = db.query(models.Customer).filter(
-        models.Customer.customer_name.ilike(f"%{query}%")
+    # Customer search suggestions
+    customers = db.query(models.Customer).options(joinedload(models.Customer.country)).filter(
+        or_(
+            func.lower(models.Customer.customer_name).like(search_pattern),
+            func.lower(models.Customer.payment_terms).like(search_pattern),
+            func.lower(models.Customer.agreement_status).like(search_pattern),
+            cast(models.Customer.id, String).like(search_pattern)
+        )
     ).limit(5).all()
     for c in customers:
         suggestions.append(schemas.SearchSuggestion(type="customer", id=str(c.id), name=c.customer_name))
 
-    # Example: Order search suggestions (by order_id or PO number)
-    orders = db.query(models.Order).filter(
-        (models.Order.order_id.ilike(f"%{query}%")) | 
-        (models.Order.po_number.ilike(f"%{query}%"))
+    # Order search suggestions
+    orders = db.query(models.Order).options(
+        joinedload(models.Order.customer),
+        joinedload(models.Order.product),
+        joinedload(models.Order.country)
+    ).filter(
+        or_(
+            func.lower(models.Order.order_id).like(search_pattern),
+            func.lower(models.Order.order_number).like(search_pattern),
+            func.lower(models.Order.po_number).like(search_pattern),
+            func.lower(models.Order.sku).like(search_pattern),
+            func.lower(models.Order.status).like(search_pattern),
+            cast(models.Order.id, String).like(search_pattern),
+            func.lower(models.Order.customer.has(models.Customer.customer_name)).like(search_pattern),
+            func.lower(models.Order.product.has(models.Product.product_name)).like(search_pattern)
+        )
     ).limit(5).all()
     for o in orders:
-        suggestions.append(schemas.SearchSuggestion(type="order", id=o.order_id, name=f"Order {o.order_id} (PO: {o.po_number})"))
+        cust_name = o.customer.customer_name if o.customer else "N/A"
+        suggestions.append(schemas.SearchSuggestion(type="order", id=str(o.id), name=f"Order {o.order_id} - {cust_name} (PO: {o.po_number})"))
 
     return {"suggestions": suggestions}
 
 
+@app.get("/api/search/full", response_model=schemas.FullSearchResponse)
+def full_search(
+    query: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    results: List[schemas.FullSearchResultItem] = []
+    if not query:
+        return {"results": []}
+
+    search_pattern = f"%{query.lower()}%"
+
+    # Search Products
+    products = db.query(models.Product).options(joinedload(models.Product.country)).filter(
+        or_(
+            func.lower(models.Product.sku_code).like(search_pattern),
+            func.lower(models.Product.product_name).like(search_pattern),
+            func.lower(models.Product.category).like(search_pattern),
+            func.lower(models.Product.customer).like(search_pattern),
+            func.lower(models.Product.pack_size).like(search_pattern),
+            func.lower(models.Product.primary_pm_code).like(search_pattern),
+            func.lower(models.Product.secondary_pm_code).like(search_pattern),
+            func.lower(models.Product.leaf_pm_code).like(search_pattern),
+            func.lower(models.Product.artwork_status).like(search_pattern),
+            cast(models.Product.id, String).like(search_pattern)
+        )
+    ).all()
+
+    for p in products:
+        c_name = p.country.name if p.country else "N/A"
+        results.append(schemas.FullSearchResultItem(
+            type="product",
+            id=str(p.id),
+            name=f"{p.product_name} ({p.sku_code})",
+            description=f"SKU: {p.sku_code}, Customer: {p.customer or 'N/A'}, Country: {c_name}, Pack: {p.pack_size or 'N/A'}",
+            link=f"/products"
+        ))
+
+    # Search Customers
+    customers = db.query(models.Customer).options(joinedload(models.Customer.country)).filter(
+        or_(
+            func.lower(models.Customer.customer_name).like(search_pattern),
+            func.lower(models.Customer.payment_terms).like(search_pattern),
+            func.lower(models.Customer.agreement_status).like(search_pattern),
+            cast(models.Customer.id, String).like(search_pattern)
+        )
+    ).all()
+
+    for c in customers:
+        c_name = c.country.name if c.country else "N/A"
+        results.append(schemas.FullSearchResultItem(
+            type="customer",
+            id=str(c.id),
+            name=c.customer_name,
+            description=f"ID: {c.id}, Country: {c_name}, Agreement: {c.agreement_status or 'N/A'}, Payment Terms: {c.payment_terms or 'N/A'}",
+            link=f"/customers/{c.id}"
+        ))
+
+    # Search Orders
+    orders = db.query(models.Order).options(
+        joinedload(models.Order.customer),
+        joinedload(models.Order.product),
+        joinedload(models.Order.country)
+    ).filter(
+        or_(
+            func.lower(models.Order.order_id).like(search_pattern),
+            func.lower(models.Order.order_number).like(search_pattern),
+            func.lower(models.Order.po_number).like(search_pattern),
+            func.lower(models.Order.sku).like(search_pattern),
+            func.lower(models.Order.shipping_terms).like(search_pattern),
+            func.lower(models.Order.remarks).like(search_pattern),
+            func.lower(models.Order.status).like(search_pattern),
+            func.lower(models.Order.compliance_status).like(search_pattern),
+            func.lower(models.Order.compliance_remarks).like(search_pattern),
+            cast(models.Order.id, String).like(search_pattern),
+            func.lower(models.Order.customer.has(models.Customer.customer_name)).like(search_pattern),
+            func.lower(models.Order.product.has(models.Product.product_name)).like(search_pattern)
+        )
+    ).all()
+
+    for o in orders:
+        cust_name = o.customer.customer_name if o.customer else "N/A"
+        prod_name = o.product.product_name if o.product else "N/A"
+        results.append(schemas.FullSearchResultItem(
+            type="order",
+            id=str(o.id),
+            name=f"Order {o.order_id} (PO: {o.po_number})",
+            description=f"ID: {o.id}, Customer: {cust_name}, Product: {prod_name}, Status: {o.status}",
+            link=f"/orders/{o.id}"
+        ))
+
+    return {"results": results}
+
+@app.patch("/api/products/{sku}/pm-code", response_model=schemas.ProductResponse)
 def update_product_pm_code(
     sku: str,
-    data: dict,
+    product_update: schemas.ProductPMCodeUpdate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
@@ -476,9 +576,11 @@ def update_product_pm_code(
     product = db.query(models.Product).filter(models.Product.sku_code == sku).first()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
-    product.primary_pm_code = data.get("primary_pm_code", product.primary_pm_code)
-    product.secondary_pm_code = data.get("secondary_pm_code", product.secondary_pm_code)
-    product.leaf_pm_code = data.get("leaf_pm_code", product.leaf_pm_code)
+    
+    update_data = product_update.dict(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(product, key, value)
+        
     db.commit()
     db.refresh(product)
     return product
@@ -542,6 +644,48 @@ def create_pm_request(
         )
         db.add(transaction)
             
+    db.commit()
+    db.refresh(request)
+    return request
+
+@app.post("/api/products/pm-requests/{request_id}/submit-artwork", response_model=schemas.PMCodeRequestResponse)
+def submit_artwork_pm_code(
+    request_id: int,
+    data: schemas.PMCodeArtworkSubmit,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    if current_user.department != "Artwork":
+        raise HTTPException(status_code=403, detail="Only Artwork department can submit PM Code for review")
+
+    request = db.query(models.PMCodeRequest).filter(models.PMCodeRequest.id == request_id).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="PM Code Request not found")
+    
+    if request.status != "PENDING_ARTWORK":
+        raise HTTPException(status_code=400, detail="PM Code Request is not in PENDING_ARTWORK status")
+
+    old_status = request.status
+    request.current_primary_pm_code = data.primary_pm_code
+    request.current_secondary_pm_code = data.secondary_pm_code
+    request.current_leaf_pm_code = data.leaf_pm_code
+    request.status = "AWAITING_REGULATORY_APPROVAL"
+    request.updated_at = datetime.utcnow()
+
+    transaction = models.PMCodeTransaction(
+        request_id=request.id,
+        from_state=old_status,
+        to_state=request.status,
+        action_by_dept="Artwork",
+        action_by_user_id=current_user.id,
+        primary_pm_code=data.primary_pm_code,
+        secondary_pm_code=data.secondary_pm_code,
+        leaf_pm_code=data.leaf_pm_code,
+        remarks=data.remarks,
+        created_at=datetime.utcnow(),
+        response_time_days=0.0 # This will be calculated by regulatory later.
+    )
+    db.add(transaction)
     db.commit()
     db.refresh(request)
     return request
@@ -645,10 +789,15 @@ def create_registration(
     ).first()
 
     if existing_registration:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Registration for SKU '{registration_request.sku}' already exists in {registration_request.country}"
-        )
+        # Automatically update existing registration instead of creating a duplicate
+        existing_registration.registration_number = registration_request.registration_number
+        existing_registration.registration_status = registration_request.registration_status
+        existing_registration.registration_issue_date = registration_request.registration_issue_date
+        existing_registration.registration_expiry_date = registration_request.registration_expiry_date
+        existing_registration.remarks = registration_request.remarks
+        db.commit()
+        db.refresh(existing_registration)
+        return existing_registration
     
     # Create the registration with the resolved country_id
     db_registration = models.Registration(
@@ -683,6 +832,27 @@ def get_registrations(
     registrations = query.offset(skip).limit(limit).all()
     return registrations
 
+@app.put("/api/registrations/{registration_id}", response_model=schemas.RegistrationResponse)
+def update_registration(
+    registration_id: int,
+    registration_request: schemas.RegistrationCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    db_registration = db.query(models.Registration).filter(models.Registration.id == registration_id).first()
+    if not db_registration:
+        raise HTTPException(status_code=404, detail="Registration not found")
+
+    db_registration.registration_number = registration_request.registration_number
+    db_registration.registration_status = registration_request.registration_status
+    db_registration.registration_issue_date = registration_request.registration_issue_date
+    db_registration.registration_expiry_date = registration_request.registration_expiry_date
+    db_registration.remarks = registration_request.remarks
+
+    db.commit()
+    db.refresh(db_registration)
+    return db_registration
+
 
 DEFAULT_COUNTRIES = [
     "Afghanistan", "Albania", "Algeria", "Argentina", "Australia", "Austria", "Bangladesh", "Belgium", "Brazil", 
@@ -695,10 +865,7 @@ DEFAULT_COUNTRIES = [
     "Uzbekistan", "Vietnam", "Zambia", "Zimbabwe"
 ]
 
-DEFAULT_CATEGORIES = [
-    "Drug", "Nutra", "Excipient", "Pharmaceutical", "Nutraceutical", "Cosmetic", "Medical Device", "OTC", 
-    "Herbal / Botanical", "Biological", "Veterinary", "Food Supplement"
-]
+
 
 @app.get("/api/countries", response_model=List[schemas.Country])
 def get_countries(
@@ -720,14 +887,7 @@ def get_customers_by_country_id(
     return customers
 
 
-@app.get("/api/categories", response_model=schemas.CategoryListResponse)
-def get_categories(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    return {
-        "categories": ["PP", "PNS"]
-    }
+
 
 
 @app.get("/api/registrations/by-sku", response_model=List[schemas.RegistrationResponse])
@@ -769,7 +929,7 @@ def get_registration_by_country_and_sku(
         .first()
     )
     if not registration:
-        return {} 
+        return None 
     return registration
 
 @app.post("/api/registrations/{registration_id}/upload")
@@ -805,7 +965,7 @@ def get_customers(
     country_id: Optional[int] = None,
     product_sku: Optional[str] = None,
     product_name: Optional[str] = None,
-    product_category: Optional[str] = None,
+
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
@@ -814,14 +974,7 @@ def get_customers(
     if country_id:
         query = query.filter(models.Customer.country_id == country_id)
 
-    if product_sku or product_name or product_category:
-        subquery = db.query(models.Product.customer).distinct()
-        if product_sku:
-            subquery = subquery.filter(models.Product.sku_code == product_sku)
-        if product_name:
-            subquery = subquery.filter(models.Product.product_name == product_name)
-        if product_category:
-            subquery = subquery.filter(models.Product.category == product_category)
+    if product_sku or product_name:
 
         # If a country_id is provided, filter products by that country as well
         if country_id:
@@ -958,7 +1111,7 @@ def run_compliance_check(order: models.Order, db: Session):
     
     # Check batch size
     if product and product.standard_batch_size:
-        if order.quantity < product.moq:
+        if product.moq is not None and order.quantity < product.moq:    
             issues.append(f"Order quantity below MOQ ({product.moq})")
     
     if issues:
@@ -991,8 +1144,8 @@ def create_milestones(order: models.Order, db: Session):
     """Create default milestones for order"""
     milestones = [
         # Artwork milestones
-        # {"name": "Artwork Requested", "category": "Artwork"},
-        # {"name": "Artwork Approved", "category": "Artwork"},
+        {"name": "Artwork Requested", "category": "Artwork"},
+        {"name": "Artwork Approved", "category": "Artwork"},
         {"name": "PO Released", "category": "Artwork"},
         {"name": "PM Received", "category": "Artwork"},
         # SCM milestones
@@ -1011,7 +1164,7 @@ def create_milestones(order: models.Order, db: Session):
         milestone = models.Milestone(
             order_id=order.id,
             name=m["name"],
-            category=m["category"],
+            category=m["category"], # Include category
             status="PENDING"
         )
         db.add(milestone)
@@ -1333,7 +1486,6 @@ def get_orders(
             f"id={order.id}, "
             f"order_id={order.order_id}, "
             f"order_type={getattr(order, 'order_type', None)}, "
-            f"category={getattr(order, 'category', None)}, "
             f"sku={order.sku}, "
             f"status={order.status}"
         )
@@ -1365,12 +1517,7 @@ def create_order(
     customer_prefix = customer.customer_name[:3].upper() if customer and customer.customer_name else "XXX"
     current_time = datetime.now()
     order_number = f"{country_prefix}-{customer_prefix}-{current_time.strftime('%m%Y')}"
-    
     order_data = order.dict()
-    if not order_data.get('category'):
-        prod = db.query(models.Product).filter(models.Product.sku_code == order_data.get('sku')).first()
-        if prod and prod.category:
-            order_data['category'] = prod.category
 
     # If PO number is provided, append count
     if order.po_number:
@@ -1442,7 +1589,7 @@ def create_order(
         db.add(approval)
     
     # Create initial milestones
-    create_milestones(db_order, db)
+    ensure_order_milestones(db_order.id, db)
     
     # Log audit
     log_audit(db, db_order.id, current_user.id, "ORDER_CREATED", None, "NEW ORDER", 
@@ -1452,12 +1599,134 @@ def create_order(
     db.refresh(db_order)
     return db_order
 
+def ensure_order_milestones(order_id: int, db: Session):
+    default_milestones = [
+        ("PO Released", "Artwork"),
+        ("PM Received", "Artwork"),
+        ("Production Planned", "SCM"),
+        ("Production Started", "SCM"),
+        ("Production Completed", "SCM"),
+        ("Batch Released", "SCM"),
+        ("Ready for Shipment", "Logistics"),
+        ("Freight Booked", "Logistics"),
+        ("Shipped", "Logistics"),
+        ("Delivered", "Logistics")
+    ]
+    
+    try:
+        existing = db.query(models.Milestone).filter(models.Milestone.order_id == order_id).all()
+        
+        # 1. Clean up invalid/nameless milestones & rename legacy PM Procurement Released
+        for m in existing:
+            if not m.name or not str(m.name).strip():
+                db.delete(m)
+            elif m.name == "PM Procurement Released":
+                m.name = "PO Released"
+        db.commit()
+        
+        # 2. Deduplicate by milestone name
+        existing = db.query(models.Milestone).filter(models.Milestone.order_id == order_id).all()
+        existing_map = {}
+        dupes_to_delete = []
+        
+        for m in existing:
+            name_key = str(m.name).strip()
+            if name_key in existing_map:
+                prev = existing_map[name_key]
+                if m.status == 'COMPLETED' and prev.status != 'COMPLETED':
+                    dupes_to_delete.append(prev)
+                    existing_map[name_key] = m
+                else:
+                    dupes_to_delete.append(m)
+            else:
+                existing_map[name_key] = m
+                
+        if dupes_to_delete:
+            for d in dupes_to_delete:
+                db.delete(d)
+            db.commit()
+            
+        # 3. Add any missing default milestones safely
+        added_count = 0
+        for m_name, m_cat in default_milestones:
+            if m_name not in existing_map:
+                new_m = models.Milestone(
+                    order_id=order_id,
+                    name=m_name,
+                    category=m_cat,
+                    status="PENDING"
+                )
+                db.add(new_m)
+                added_count += 1
+        
+        if added_count > 0:
+            db.commit()
+            logging.info(f"Initialized {added_count} missing milestones for Order #{order_id}")
+        else:
+            logging.info(f"Milestones already fully initialized for Order #{order_id}")
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Milestone initialization failed for Order #{order_id}: {e}")
+        raise e
+
+
+def ensure_order_approvals(order_id: int, db: Session):
+    approval_sequence = [
+        ("EXPORTS_MANAGER_INITIAL", 1),
+        ("REGULATORY", 2),
+        ("FINANCE", 3),
+        ("EXPORTS_MANAGER_FINAL", 4),
+    ]
+    
+    existing = db.query(models.OrderApproval).filter(models.OrderApproval.order_id == order_id).order_by(models.OrderApproval.id.asc()).all()
+    seen_depts = {}
+    dupes_to_delete = []
+    
+    for app in existing:
+        dept = app.department
+        if dept in seen_depts:
+            prev = seen_depts[dept]
+            if app.status != 'PENDING' and prev.status == 'PENDING':
+                dupes_to_delete.append(prev)
+                seen_depts[dept] = app
+            else:
+                dupes_to_delete.append(app)
+        else:
+            seen_depts[dept] = app
+            
+    if dupes_to_delete:
+        for d in dupes_to_delete:
+            db.delete(d)
+        db.commit()
+        
+    for dept, correct_seq in approval_sequence:
+        if dept in seen_depts:
+            app = seen_depts[dept]
+            if app.sequence != correct_seq:
+                app.sequence = correct_seq
+        else:
+            new_app = models.OrderApproval(
+                order_id=order_id,
+                department=dept,
+                status=models.ApprovalStatus.PENDING.value,
+                sequence=correct_seq
+            )
+            db.add(new_app)
+    db.commit()
+
+
 @app.get("/api/orders/{order_id}", response_model=schemas.OrderResponse)
 def get_order(
     order_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    # Ensure exactly 4 unique approvals exist (1: Exports Initial, 2: Regulatory, 3: Finance, 4: Exports Final)
+    ensure_order_approvals(order_id, db)
+
+    # Ensure all 12 default milestones exist with proper names and no duplicates
+    ensure_order_milestones(order_id, db)
+
     order = db.query(models.Order).options(
         joinedload(models.Order.customer),
         joinedload(models.Order.product),
@@ -1468,14 +1737,6 @@ def get_order(
     ).filter(models.Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-
-    modified = False
-    for m in (order.milestones or []):
-        if m.name == "PM Procurement Released":
-            m.name = "PO Released"
-            modified = True
-    if modified:
-        db.commit()
 
     return order
 
@@ -1584,6 +1845,15 @@ def get_can_approve(
 
     # Exports Manager Path
     if user_dept == "Exports":
+        if current_user.role != "manager":
+            return {
+                "can_approve": False,
+                "is_scm_override": False,
+                "is_exports_override": False,
+                "reason": "Only Exports Manager can approve created orders",
+                "current_sequence": None,
+                "waiting_for": None
+            }
         if next_pending.department in [models.ApprovalDepartment.EXPORTS_MANAGER_INITIAL.value, models.ApprovalDepartment.EXPORTS_MANAGER_FINAL.value]:
             return {
                 "can_approve": True,
@@ -1653,6 +1923,11 @@ def approve_order(
 
     # Exports Manager Override Path
     if user_dept == "Exports":
+        if current_user.role != "manager":
+            raise HTTPException(
+                status_code=403,
+                detail="Only Exports Manager can approve created orders"
+            )
         exports_pending_approvals = [
             a for a in all_approvals
             if a.status == models.ApprovalStatus.PENDING.value and
@@ -1936,26 +2211,8 @@ def update_milestone(
         raise HTTPException(status_code=404, detail="Milestone not found")
 
     user_dept = current_user.department
-    print(f"DEBUG: User Department: {current_user.department}, Milestone Category: {milestone.category}")
+    print(f"DEBUG: User Department: {current_user.department}")
 
-    # Authorization logic for milestone updates
-    if milestone.category == "Logistics" and user_dept != "Regulatory":
-        raise HTTPException(
-            status_code=403,
-            detail="Only the Exports department is allowed to update Logistics milestones."
-        )
-    elif milestone.category == "SCM" and user_dept != "SCM":
-        raise HTTPException(
-            status_code=403,
-            detail="Only the SCM department is allowed to update SCM milestones."
-        )
-    elif milestone.category not in ["Logistics", "SCM"]:
-        # For other categories, we might need a more general rule or explicit denials.
-        # This implicitly denies updates for categories not explicitly handled.
-        raise HTTPException(
-            status_code=403,
-            detail=f"Updates for {milestone.category} milestones are not explicitly authorized for your department."
-        )
 
     prev_status = milestone.status
 
@@ -2039,6 +2296,7 @@ def get_milestone_history(
                 change_type=entry.change_type,
                 old_value=entry.old_value,
                 new_value=entry.new_value,
+                remarks=entry.remarks,
                 changed_by_user=user_response,
                 changed_at=entry.changed_at,
             )
@@ -2064,21 +2322,51 @@ def update_milestone_by_id(
     user_dept = current_user.department
     prev_status = milestone.status
 
-    if milestone_update.status:
-        milestone.status = milestone_update.status
+    # Departmental milestone update permissions
+    scm_allowed_milestones = [
+        "PO Released", "PM Procurement Released", "PM Received",
+        "Production Planned", "Production Started", "Production Completed", "Batch Released"
+    ]
+    exports_only_milestones = ["Ready for Shipment", "Freight Booked", "Shipped", "Delivered"]
+
+    if user_dept == "SCM" and milestone.name in exports_only_milestones:
+        raise HTTPException(status_code=403, detail="SCM department is not authorized to update Ready for Shipment, Freight Booked, Shipped, or Delivered milestones.")
+    elif user_dept in ["Exports", "Exports Team"] and milestone.name in scm_allowed_milestones:
+        raise HTTPException(status_code=403, detail="Exports department is not authorized to update SCM milestones.")
+
+    # Mandatory remarks check when target date or status is modified
+    if (milestone_update.target_date is not None and milestone.target_date != milestone_update.target_date) or (milestone_update.status and prev_status != milestone_update.status):
+        if not milestone_update.remarks or not milestone_update.remarks.strip():
+            raise HTTPException(status_code=400, detail="Remarks are mandatory when updating milestone target date or status.")
+
     if milestone_update.target_date is not None:
         if milestone.target_date != milestone_update.target_date:
-            old_val = str(milestone.target_date) if milestone.target_date else None
-            new_val = str(milestone_update.target_date) if milestone_update.target_date else None
+            old_val = str(milestone.target_date.strftime('%Y-%m-%d')) if milestone.target_date else "Not Set"
+            new_val = str(milestone_update.target_date.strftime('%Y-%m-%d')) if milestone_update.target_date else "Not Set"
             hist = models.MilestoneHistory(
                 milestone_id=milestone.id,
                 change_type="TARGET_DATE_UPDATE",
                 old_value=old_val,
                 new_value=new_val,
+                remarks=milestone_update.remarks.strip() if milestone_update.remarks else None,
                 changed_by_user_id=current_user.id
             )
             db.add(hist)
         milestone.target_date = milestone_update.target_date
+
+    if milestone_update.status:
+        if prev_status != milestone_update.status:
+            hist = models.MilestoneHistory(
+                milestone_id=milestone.id,
+                change_type="STATUS_UPDATE",
+                old_value=prev_status,
+                new_value=milestone_update.status,
+                remarks=milestone_update.remarks.strip() if milestone_update.remarks else None,
+                changed_by_user_id=current_user.id
+            )
+            db.add(hist)
+        milestone.status = milestone_update.status
+
     if milestone_update.actual_date is not None:
         milestone.actual_date = milestone_update.actual_date
     if milestone_update.remarks is not None:
@@ -2093,8 +2381,7 @@ def update_milestone_by_id(
             create_delay_alert(order, milestone, db)
 
     # The prev_order_status is local to this function, so define it here
-    # This was the fix for the problem: [Pyrefly Error] 1779 |     if prev_order_status != order.status: : Could not find name `prev_order_status`
-    prev_order_status_for_milestone_update = order.status # Define the variable here
+    prev_order_status_for_milestone_update = order.status
     update_order_status_from_milestones(order, db, current_user.id, request.client.host)
 
     log_audit(
@@ -2107,50 +2394,101 @@ def update_milestone_by_id(
     db.commit()
     return {"message": "Milestone updated successfully"}
 
-@app.post("/api/orders/{order_id}/milestones/target-dates")
+
+@app.put("/api/orders/{order_id}/milestones/bulk-target-dates")   # ⚠️ KEEP YOUR EXISTING PATH — do not copy this line if yours differs
 def set_bulk_target_dates(
     order_id: int,
     payload: schemas.BulkTargetDateRequest,
-    request: Request,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    if current_user.department not in ["SCM", "Exports", "Exports Team"]:
-        raise HTTPException(status_code=403, detail="Only SCM and Exports departments can set milestone target dates in bulk.")
+    if current_user.department not in ("SCM", "Management"):
+        raise HTTPException(status_code=403, detail="Only SCM or Management can set milestone target dates")
 
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    count = 0
-    for item in payload.milestones:
-        m = db.query(models.Milestone).filter(models.Milestone.id == item.milestone_id, models.Milestone.order_id == order_id).first()
-        if m and m.target_date != item.target_date:
-            old_val = str(m.target_date) if m.target_date else None
-            new_val = str(item.target_date) if item.target_date else None
-            hist = models.MilestoneHistory(
-                milestone_id=m.id,
-                change_type="TARGET_DATE_UPDATE",
-                old_value=old_val,
-                new_value=new_val,
-                changed_by_user_id=current_user.id
-            )
-            db.add(hist)
-            m.target_date = item.target_date
-            m.updated_at = datetime.utcnow()
-            count += 1
+    def _norm(value: str) -> str:
+        return " ".join((value or "").strip().lower().split())
 
-    log_audit(
-        db, order_id, current_user.id, "BULK_MILESTONE_TARGET_DATES_SET",
-        None, None,
-        f"SCM user set target dates for {count} milestones",
-        request.client.host
-    )
+    ALIASES = {"pm procurement released": "po released"}
+    CATEGORY_BY_NAME = {
+        "PO Released": "Artwork", "PM Received": "Artwork",
+        "Production Planned": "SCM", "Production Started": "SCM",
+        "Production Completed": "SCM", "Batch Released": "SCM",
+        "Ready for Shipment": "Logistics", "Freight Booked": "Logistics",
+        "Shipped": "Logistics", "Delivered": "Logistics",
+    }
+
+    results = []
+    for item in payload.milestones:
+        milestone = None
+
+        # 1) Find by ID
+        if item.milestone_id:
+            milestone = db.query(models.Milestone).filter(
+                models.Milestone.id == item.milestone_id,
+                models.Milestone.order_id == order_id
+            ).first()
+
+        # 2) Fallback: find by name (handles alias)
+        if milestone is None and item.milestone_name:
+            wanted = _norm(item.milestone_name)
+            for m in order.milestones:
+                db_name = _norm(m.name)
+                if db_name == wanted or ALIASES.get(db_name) == wanted:
+                    milestone = m
+                    break
+
+        # 3) Still missing → create it (for orders whose milestones were never initialized)
+        if milestone is None:
+            if not item.milestone_name:
+                raise HTTPException(status_code=400,
+                    detail=f"Milestone id={item.milestone_id} not found for order {order_id}")
+            milestone = models.Milestone(
+                order_id=order_id,
+                name=item.milestone_name,
+                category=CATEGORY_BY_NAME.get(item.milestone_name, "SCM"),
+                status="PENDING",
+                target_date=item.target_date,
+            )
+            db.add(milestone)
+            db.flush()
+            results.append({"milestone_id": milestone.id, "milestone_name": milestone.name,
+                            "target_date": str(item.target_date) if item.target_date else None,
+                            "action": "created"})
+            continue
+
+        # Existing → update + write history
+        old_date = milestone.target_date
+        if old_date != item.target_date:
+            db.add(models.MilestoneHistory(
+                milestone_id=milestone.id,
+                change_type="TARGET_DATE_UPDATE",
+                old_value=str(old_date) if old_date else None,
+                new_value=str(item.target_date) if item.target_date else None,
+                changed_by_user_id=current_user.id,
+            ))
+            milestone.target_date = item.target_date
+            action = "updated"
+        else:
+            action = "unchanged"
+
+        results.append({"milestone_id": milestone.id, "milestone_name": milestone.name,
+                        "target_date": str(item.target_date) if item.target_date else None,
+                        "action": action})
+
+    # Audit trail entry (uses your existing helper)
+    log_audit(db, order_id=order_id, user_id=current_user.id,
+              action="MILESTONE_TARGET_DATES_SET",
+              prev_status=None, new_status=None,
+              remarks=" | ".join(f"{r['milestone_name']} → {r['target_date']}" for r in results))
 
     db.commit()
-    return {"message": f"Successfully updated target dates for {count} milestones"}
+    return {"order_id": order_id, "results": results}
 
-
+    
 def create_delay_alert(order: models.Order, milestone: models.Milestone, db: Session):
     """Create alert for delayed milestone"""
     alert = models.Alert(

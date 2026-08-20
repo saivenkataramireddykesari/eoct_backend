@@ -64,7 +64,8 @@ class Product(Base):
     id = Column(Integer, primary_key=True, index=True)
     sku_code = Column(String(50), unique=True, index=True, nullable=False)
     product_name = Column(String(200), nullable=False)
-    category = Column(String(100))
+    category = Column("manufacturing_unit", String(50)) # Map to category for schemas
+    price = Column(Float) # Add price field
     country_id = Column(Integer, ForeignKey("countries.id"))
     country = relationship("Country")
     customer = Column(String(200))
@@ -146,16 +147,6 @@ class Customer(Base):
             return session.query(Order).filter(Order.customer_id == self.id).count()
         return len(self.orders)
 
-    @property
-    def category(self):
-        name_upper = self.customer_name.upper() if self.customer_name else ""
-        if any(kw in name_upper for kw in ["PHARMA", "MED", "CLINIC", "HOSPITAL", "DRUG"]):
-            return "Drug"
-        elif any(kw in name_upper for kw in ["NUTRA", "NUTRITION", "HEALTH", "BIO", "VITA"]):
-            return "Nutra"
-        elif any(kw in name_upper for kw in ["LAB", "CHEMICAL", "EXCIPIENT", "INGREDIENT"]):
-            return "Excipient"
-        return "Drug"
 
 
 class Order(Base):
@@ -170,7 +161,7 @@ class Order(Base):
     po_number = Column(String(50), nullable=False)
     po_date = Column(Date, nullable=False)
     sku = Column(String(50), ForeignKey("products.sku_code"), nullable=False)
-    category = Column(String(100))
+
     sales_quantity = Column(Integer, default=0)
     free_quantity = Column(Integer, default=0)
     quantity = Column(Integer, nullable=False)  # total = sales + free
@@ -229,7 +220,8 @@ class Milestone(Base):
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
     name = Column(String(100), nullable=False)  # Artwork Requested, Artwork Approved, etc.
-    category = Column(String(50), nullable=False)  # Artwork, SCM, Logistics
+    category = Column(String(50), nullable=True)
+
     status = Column(String(50), default="PENDING")  # PENDING, IN PROGRESS, COMPLETED, DELAYED
     target_date = Column(Date)
     actual_date = Column(Date)
@@ -315,6 +307,7 @@ class MilestoneHistory(Base):
     change_type = Column(String(50), nullable=False)  # e.g., "TARGET_DATE_UPDATE", "STATUS_UPDATE"
     old_value = Column(String(100))
     new_value = Column(String(100))
+    remarks = Column(Text, nullable=True)
     changed_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     changed_at = Column(DateTime, default=datetime.utcnow)
     

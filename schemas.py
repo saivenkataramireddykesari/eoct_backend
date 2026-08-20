@@ -76,6 +76,12 @@ class PMCodeSubmit(BaseModel):
     leaf_pm_code: str
     remarks: Optional[str] = None
 
+class PMCodeArtworkSubmit(BaseModel):
+    primary_pm_code: str
+    secondary_pm_code: Optional[str] = None
+    leaf_pm_code: Optional[str] = None
+    remarks: Optional[str] = None
+
 class PMCodeDecision(BaseModel):
     decision: str  # ACCEPT or REJECT
     remarks: Optional[str] = None
@@ -87,8 +93,10 @@ class PMCodeDecision(BaseModel):
 # Product Schemas
 class ProductBase(BaseModel):
     sku_code: str
-    product_name: str
-    category: Optional[str] = None
+    product_name: str # Add product_name to base
+    category: Optional[str] = None # Add category
+    price: Optional[float] = None # Add price
+
     country_id: int
     customer: Optional[str] = None
     pack_size: Optional[str] = None
@@ -114,8 +122,10 @@ class ProductCreate(ProductBase):
     pass
 
 class ProductUpdate(BaseModel):
-    product_name: Optional[str] = None
-    category: Optional[str] = None
+    product_name: Optional[str] = None # Add product_name to update
+    category: Optional[str] = None # Add category
+    price: Optional[float] = None # Add price
+
     country_id: int
     customer: Optional[str] = None
     pack_size: Optional[str] = None
@@ -127,6 +137,12 @@ class ProductUpdate(BaseModel):
     current_artwork_version: Optional[str] = None
     artwork_status: Optional[str] = None
     is_active: Optional[bool] = None
+
+
+class ProductPMCodeUpdate(BaseModel):
+    primary_pm_code: Optional[str] = None
+    secondary_pm_code: Optional[str] = None
+    leaf_pm_code: Optional[str] = None
 
 
 class ProductResponse(ProductBase):
@@ -157,6 +173,16 @@ class SearchSuggestion(BaseModel):
     
 class SearchSuggestionsResponse(BaseModel):
     suggestions: List[SearchSuggestion]
+
+class FullSearchResultItem(BaseModel):
+    type: str
+    id: str
+    name: str
+    description: Optional[str] = None
+    link: str
+
+class FullSearchResponse(BaseModel):
+    results: List[FullSearchResultItem]
 
 # Registration Schemas
 class RegistrationBase(BaseModel):
@@ -222,8 +248,7 @@ class CustomerResponse(CustomerBase):
     updated_at: Optional[datetime] = None
     order_type: Optional[str] = None # New field for auto-selection
     default_artwork_status: Optional[str] = None # New field for auto-selection
-    order_count: Optional[int] = None
-    category: Optional[str] = None
+
     country: Optional["Country"] = None # Relationship
 
     class Config:
@@ -240,8 +265,7 @@ class CustomerUpdate(BaseModel):
 
 # Milestone Schemas
 class MilestoneBase(BaseModel):
-    name: str
-    category: str
+    category: Optional[str] = None
     status: str = "PENDING"
     target_date: Optional[date] = None
     actual_date: Optional[date] = None
@@ -253,12 +277,12 @@ class MilestoneCreate(MilestoneBase):
 class MilestoneResponse(MilestoneBase):
     id: int
     order_id: int
+    name: str                                      # ✅ ADDED — this was the bug
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
-
 class MilestoneUpdate(BaseModel):
     status: Optional[str] = None
     actual_date: Optional[date] = None
@@ -345,11 +369,12 @@ class OrderBase(BaseModel):
     po_number: str
     po_date: date
     sku: str
-    category: Optional[str] = None
+
     sales_quantity: int = 0
     free_quantity: int = 0
     quantity: int
     requested_delivery_date: date
+    order_type: Optional[str] = None
     shipping_terms: Optional[str] = None
     import_license_required: bool = False
     import_license_validity: Optional[date] = None
@@ -431,12 +456,18 @@ class ComplianceCheckResult(BaseModel):
 class CountryListResponse(BaseModel):
     countries: List[str]
 
-class CategoryListResponse(BaseModel):
-    categories: List[str]
+
 
 class BulkTargetDateItem(BaseModel):
-    milestone_id: int
-    target_date: Optional[datetime] = None
+    milestone_id: Optional[int] = None             # ✅ now optional
+    milestone_name: Optional[str] = None           # ✅ added — fallback lookup / creation
+    target_date: Optional[date] = None
+
+    @validator('target_date', pre=True)
+    def parse_empty_date(cls, v):
+        if v == '' or v is None:
+            return None
+        return v
 
 class BulkTargetDateRequest(BaseModel):
     milestones: List[BulkTargetDateItem]
@@ -447,6 +478,7 @@ class MilestoneHistoryResponse(BaseModel):
     change_type: str
     old_value: Optional[str] = None
     new_value: Optional[str] = None
+    remarks: Optional[str] = None
 
     @validator('old_value', 'new_value', pre=True)
     def convert_date_to_str(cls, v):
