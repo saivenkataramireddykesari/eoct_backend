@@ -53,7 +53,7 @@ def update_existing_milestone_names():
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000","https://exportordercontroltower.netlify.app",],  # React frontend
+    allow_origins=["http://localhost:3000","https://exportordercontroltower.netlify.app","https://eoct-frontend.pages.dev"],  # React frontend
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
