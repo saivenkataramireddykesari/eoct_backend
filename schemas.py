@@ -13,7 +13,7 @@ class UserBase(BaseModel):
     department: str
     role: str = "user"
     is_active: bool = True
-    order_type: Optional[str] = None
+    manufacturing_unit: Optional[str] = None
 
 class UserCreate(UserBase):
     password: str
@@ -95,7 +95,7 @@ class ProductBase(BaseModel):
     sku_code: str
     product_name: str # Add product_name to base
     category: Optional[str] = None # Add category
-    price: Optional[float] = None # Add price
+    price: Optional[float] = 0.0 # Add price
 
     country_id: int
     customer: Optional[str] = None
@@ -246,7 +246,7 @@ class CustomerResponse(CustomerBase):
     is_active: bool
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-    order_type: Optional[str] = None # New field for auto-selection
+    manufacturing_unit: Optional[str] = None # New field for auto-selection
     default_artwork_status: Optional[str] = None # New field for auto-selection
 
     country: Optional["Country"] = None # Relationship
@@ -368,17 +368,22 @@ class OrderBase(BaseModel):
     country_id: int
     po_number: str
     po_date: date
-    sku: str
+    sku: Optional[str] = None
+    unregistered_product_name: Optional[str] = None
+    unregistered_product_description: Optional[str] = None
+
 
     sales_quantity: int = 0
     free_quantity: int = 0
     quantity: int
     requested_delivery_date: date
-    order_type: Optional[str] = None
+    manufacturing_unit: Optional[str] = None
     shipping_terms: Optional[str] = None
     import_license_required: bool = False
     import_license_validity: Optional[date] = None
     remarks: Optional[str] = None
+    order_price: Optional[float] = None
+    currency: Optional[str] = "USD"
 
 class OrderCreate(OrderBase):
     status: Optional[OrderStatus] = None
@@ -403,6 +408,7 @@ class OrderResponse(OrderBase):
     milestones: List[MilestoneResponse] = []
     alerts: List[AlertResponse] = []
     country: Optional["Country"] = None
+    order_price: Optional[float] = 0.0
 
     class Config:
         from_attributes = True
@@ -496,7 +502,3 @@ ProductResponse.model_rebuild(_types_namespace=globals())
 RegistrationResponse.model_rebuild(_types_namespace=globals())
 CustomerResponse.model_rebuild(_types_namespace=globals())
 OrderResponse.model_rebuild(_types_namespace=globals())
-
-
-
-

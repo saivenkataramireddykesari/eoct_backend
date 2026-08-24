@@ -52,7 +52,7 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login = Column(DateTime)
-    order_type = Column(String(50), nullable=True) # For SCM users (PP, PNS, ALL)
+    manufacturing_unit = Column(String(50), nullable=True) # For SCM users (PP, PNS, ALL)
     
     approvals = relationship("OrderApproval", back_populates="approver")
     audit_logs = relationship("AuditLog", back_populates="user")
@@ -130,7 +130,7 @@ class Customer(Base):
     orders = relationship("Order", back_populates="customer")
 
     @property
-    def order_type(self):
+    def manufacturing_unit(self):
         if self.customer_name and self.customer_name.startswith('P'):
             return "PP"
         return "PNS"
@@ -160,17 +160,21 @@ class Order(Base):
     country = relationship("Country")
     po_number = Column(String(50), nullable=False)
     po_date = Column(Date, nullable=False)
-    sku = Column(String(50), ForeignKey("products.sku_code"), nullable=False)
+    sku = Column(String(50), ForeignKey("products.sku_code"), nullable=True)
+    unregistered_product_name = Column(String(200), nullable=True)
+    unregistered_product_description = Column(Text, nullable=True)
 
     sales_quantity = Column(Integer, default=0)
     free_quantity = Column(Integer, default=0)
     quantity = Column(Integer, nullable=False)  # total = sales + free
     requested_delivery_date = Column(Date, nullable=False)
-    order_type = Column(String(20), nullable=True, default="PNS")
+    manufacturing_unit = Column(String(20), nullable=True, default="PNS")
     shipping_terms = Column(String(100))
     import_license_required = Column(Boolean, default=False)
     import_license_validity = Column(Date)
     remarks = Column(Text)
+    order_price = Column(Float, default=0.0)
+    currency = Column(String(10), nullable=False, default="USD")
     
     # Status tracking
     status = Column(String(50), default=OrderStatus.PENDING_EXPORTS_MANAGER_APPROVAL.value)
@@ -192,7 +196,9 @@ class Order(Base):
     
     # Relationships
     customer = relationship("Customer", back_populates="orders")
-    product = relationship("Product", back_populates="orders")
+    # product = relationship("Product", back_populates="orders") # Removed for nullable SKU
+    # Conditional relationship for product
+    product = relationship("Product", primaryjoin="Order.sku == Product.sku_code", foreign_keys="Order.sku", viewonly=True)
     approvals = relationship("OrderApproval", back_populates="order", cascade="all, delete-orphan")
     milestones = relationship("Milestone", back_populates="order", cascade="all, delete-orphan")
     audit_logs = relationship("AuditLog", back_populates="order", cascade="all, delete-orphan")

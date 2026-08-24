@@ -1081,38 +1081,41 @@ def update_customer(
 
 # ==================== ORDER MANAGEMENT ====================
 
-def run_compliance_check(order: models.Order, db: Session):
+def run_compliance_check(order: models.Order, db: Session, product: Optional[models.Product]):
     """Run automatic compliance check on order"""
     issues = []
-    
-    # Check registration
-    registration = db.query(models.Registration).filter(
-        models.Registration.country_id == order.country_id,
-        models.Registration.sku == order.sku,
-        models.Registration.registration_status == "Active"
-    ).first()
-    
-    if not registration:
-        issues.append(f"No active registration found for SKU {order.sku} in {order.country.name}")
-    elif registration.registration_expiry_date and registration.registration_expiry_date < date.today():
-        issues.append(f"Registration expired for SKU {order.sku} in {order.country.name}")
-    elif registration.registration_expiry_date and registration.registration_expiry_date < order.requested_delivery_date:
-        issues.append(f"Registration expires before delivery date")
-    
-    # Check artwork
-    product = db.query(models.Product).filter(models.Product.sku_code == order.sku).first()
-    if not product or product.artwork_status != "Available":
-        issues.append(f"Artwork not available for SKU {order.sku}")
     
     # Check customer agreement
     customer = db.query(models.Customer).filter(models.Customer.id == order.customer_id).first()
     if customer and customer.agreement_status != "Active":
         issues.append(f"Customer agreement not active")
-    
-    # Check batch size
-    if product and product.standard_batch_size:
-        if product.moq is not None and order.quantity < product.moq:    
-            issues.append(f"Order quantity below MOQ ({product.moq})")
+
+    # If it's an unregistered product, skip product-specific checks
+    if order.sku is None:
+        issues.append("Unregistered product: skipping registration, artwork, and batch size checks.")
+    else:
+        # Check registration
+        registration = db.query(models.Registration).filter(
+            models.Registration.country_id == order.country_id,
+            models.Registration.sku == order.sku,
+            models.Registration.registration_status == "Active"
+        ).first()
+        
+        if not registration:
+            issues.append(f"No active registration found for SKU {order.sku} in {order.country.name}")
+        elif registration.registration_expiry_date and registration.registration_expiry_date < date.today():
+            issues.append(f"Registration expired for SKU {order.sku} in {order.country.name}")
+        elif registration.registration_expiry_date and registration.registration_expiry_date < order.requested_delivery_date:
+            issues.append(f"Registration expires before delivery date")
+        
+        # Check artwork
+        if not product or product.artwork_status != "Available":
+            issues.append(f"Artwork not available for SKU {order.sku}")
+        
+        # Check batch size
+        if product and product.standard_batch_size:
+            if product.moq is not None and order.quantity < product.moq:    
+                issues.append(f"Order quantity below MOQ ({product.moq})")
     
     if issues:
         return {
@@ -1262,8 +1265,8 @@ def get_orders(
         f"Role           : {current_user.role}"
     )
     logging.debug(
-        f"SCM Order Type : "
-        f"{getattr(current_user, 'order_type', None)}"
+        f"SCM Manufacturing Unit : "
+        f"{getattr(current_user, 'manufacturing_unit', None)}"
     )
     logging.debug(
         f"Product Type   : {product_type}"
@@ -1345,12 +1348,12 @@ def get_orders(
     # SCM FILTER
     # ============================================================
 
-    elif current_user.department == "SCM":
+    if current_user.department == "SCM":
 
         scm_type = (
             getattr(
                 current_user,
-                "order_type",
+                "manufacturing_unit",
                 None
             ) or ""
         ).strip().upper()
@@ -1358,7 +1361,7 @@ def get_orders(
         logging.debug(
             f"SCM filter -> "
             f"employee={current_user.employee_id}, "
-            f"SCM order_type={repr(scm_type)}"
+            f"SCM manufacturing_unit={repr(scm_type)}"
         )
 
         # --------------------------------------------------------
@@ -1370,13 +1373,13 @@ def get_orders(
             logging.debug(
                 f"SCM PNS user "
                 f"{current_user.employee_id} "
-                f"-> filtering Order.order_type = PNS"
+                f"-> filtering Order.manufacturing_unit = PNS"
             )
 
             query = query.filter(
                 func.upper(
                     func.trim(
-                        models.Order.order_type
+                        models.Order.manufacturing_unit
                     )
                 ) == "PNS"
             )
@@ -1390,13 +1393,13 @@ def get_orders(
             logging.debug(
                 f"SCM PP user "
                 f"{current_user.employee_id} "
-                f"-> filtering Order.order_type = PP"
+                f"-> filtering Order.manufacturing_unit = PP"
             )
 
             query = query.filter(
                 func.upper(
                     func.trim(
-                        models.Order.order_type
+                        models.Order.manufacturing_unit
                     )
                 ) == "PP"
             )
@@ -1448,8 +1451,8 @@ def get_orders(
         f"Department     : {current_user.department}"
     )
     logging.debug(
-        f"SCM Order Type : "
-        f"{getattr(current_user, 'order_type', None)}"
+        f"SCM Manufacturing Unit : "
+        f"{getattr(current_user, 'manufacturing_unit', None)}"
     )
     logging.debug(
         f"Product Type   : {product_type}"
@@ -1485,7 +1488,7 @@ def get_orders(
             f"ORDER -> "
             f"id={order.id}, "
             f"order_id={order.order_id}, "
-            f"order_type={getattr(order, 'order_type', None)}, "
+            f"manufacturing_unit={getattr(order, 'manufacturing_unit', None)}, "
             f"sku={order.sku}, "
             f"status={order.status}"
         )
@@ -1507,6 +1510,20 @@ def create_order(
             detail="Only Regulatory or Exports department can create orders"
         )
 
+    # Validation: Ensure either sku OR unregistered product details are provided if specified
+    unreg_name = getattr(order, 'unregistered_product_name', None)
+    unreg_desc = getattr(order, 'unregistered_product_description', None)
+    if order.sku and (unreg_name or unreg_desc):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot provide both SKU and unregistered product details."
+        )
+    if not order.sku and not (unreg_name and unreg_desc):
+        raise HTTPException(
+            status_code=400,
+            detail="Either SKU or both unregistered product name and description must be provided."
+        )
+
     # Generate unique Order ID
     order_id = f"ORD-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     
@@ -1517,7 +1534,7 @@ def create_order(
     customer_prefix = customer.customer_name[:3].upper() if customer and customer.customer_name else "XXX"
     current_time = datetime.now()
     order_number = f"{country_prefix}-{customer_prefix}-{current_time.strftime('%m%Y')}"
-    order_data = order.dict()
+    order_data = order.dict(exclude_unset=True) # Use exclude_unset=True to only include provided fields
 
     # If PO number is provided, append count
     if order.po_number:
@@ -1540,6 +1557,64 @@ def create_order(
     order_data['order_number'] = order_number
     # Auto-compute total quantity from sales + free
     order_data['quantity'] = order_data.get('sales_quantity', 0) + order_data.get('free_quantity', 0)
+
+    product = None
+    if order.sku:
+        # Fetch product to get its details and price
+        product = db.query(models.Product).filter(models.Product.sku_code == order.sku).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        # Auto-set manufacturing_unit from selected product's manufacturing_unit
+        if product.category:
+            order_data['manufacturing_unit'] = product.category
+
+        # Calculate order price
+        # ============================================================
+        # CALCULATE ORDER PRICE FROM FRONTEND PRICE PER UNIT
+        # ============================================================
+
+        unit_price = order_data.get("order_price")
+
+        print("========== ORDER PRICE DEBUG ==========")
+        print("SKU:", order.sku)
+        print("Quantity:", order_data.get("quantity"))
+        print("Frontend unit price:", unit_price)
+        print("Currency:", order_data.get("currency"))
+        print("=======================================")
+
+        if unit_price is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Price per unit is required."
+            )
+
+        try:
+            unit_price = float(unit_price)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail="Price per unit must be a valid number."
+            )
+
+        if unit_price <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Price per unit must be greater than 0."
+            )
+
+        # Frontend sends price PER UNIT.
+        # Database order_price stores TOTAL PRICE.
+        order_data["order_price"] = unit_price * order_data["quantity"]
+
+        print("Final total order price:", order_data["order_price"])
+    else:
+        # For unregistered products, price must be provided in the order request
+        if 'order_price' not in order_data or order_data['order_price'] is None:
+            raise HTTPException(status_code=400, detail="Order price must be provided for unregistered products.")
+        # Optionally, you might want to add a default product_name if only unregistered_product_name is given
+        # For now, it will be handled by the model directly.
+    
     db_order = models.Order(
         order_id=order_id,
         **order_data
@@ -1548,7 +1623,7 @@ def create_order(
     db.flush()  # Get order.id
     
     # Run compliance check
-    compliance_result = run_compliance_check(db_order, db)
+    compliance_result = run_compliance_check(db_order, db, product) # Pass product object
     db_order.compliance_status = compliance_result["status"]
     db_order.compliance_remarks = compliance_result["remarks"]
     
@@ -1768,8 +1843,23 @@ def update_order(
         )
         
     # Update order fields
-    for key, value in order_update.dict().items():
+    update_data = order_update.dict(exclude_unset=True)
+    for key, value in update_data.items():
         setattr(db_order, key, value)
+
+    product = None
+    if db_order.sku:
+        product = db.query(models.Product).filter(models.Product.sku_code == db_order.sku).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        if product.price is not None:
+            db_order.order_price = product.price * db_order.quantity
+        else:
+            raise HTTPException(status_code=400, detail="Product price is not set. Please set the price for the product before creating an order.")
+    else:
+        # For unregistered products, price should have been provided in the update request
+        if db_order.order_price is None:
+            raise HTTPException(status_code=400, detail="Order price must be provided for unregistered products.")
         
     # Re-run compliance check
     db.query(models.Alert).filter(
@@ -1777,7 +1867,7 @@ def update_order(
         models.Alert.alert_type == "COMPLIANCE_ISSUE"
     ).delete()
     
-    compliance_result = run_compliance_check(db_order, db)
+    compliance_result = run_compliance_check(db_order, db, product) # Pass product object
     db_order.compliance_status = compliance_result["status"]
     db_order.compliance_remarks = compliance_result["remarks"]
     
@@ -2286,7 +2376,7 @@ def get_milestone_history(
                 is_active=entry.changed_by_user.is_active,
                 created_at=entry.changed_by_user.created_at,
                 last_login=entry.changed_by_user.last_login,
-                order_type=entry.changed_by_user.order_type
+                manufacturing_unit=entry.changed_by_user.manufacturing_unit
             )
 
         response_history.append(
@@ -2668,14 +2758,17 @@ def get_dashboard(
         compliance_issues=compliance_issues_count
     )
 
-    # Fetch recent orders (e.g., last 5 updated orders)
     recent_orders_query = db.query(models.Order)
-    if current_user.department == "SCM" and getattr(current_user, 'order_type', None):
-        recent_orders_query = recent_orders_query.join(models.Order.product)
-        if current_user.order_type == "PP":
-            recent_orders_query = recent_orders_query.filter((models.Product.category == "PP") | (models.Product.category == "ALL"))
-        elif current_user.order_type == "PNS":
-            recent_orders_query = recent_orders_query.filter((models.Product.category == "PNS") | (models.Product.category == "ALL"))
+    if current_user.department == "SCM" and getattr(current_user, 'manufacturing_unit', None):
+        user_mfg_unit = current_user.manufacturing_unit.strip().upper()
+        if user_mfg_unit == "PP":
+            recent_orders_query = recent_orders_query.filter(
+                func.upper(func.trim(models.Order.manufacturing_unit)) == "PP"
+            )
+        elif user_mfg_unit == "PNS":
+            recent_orders_query = recent_orders_query.filter(
+                func.upper(func.trim(models.Order.manufacturing_unit)) == "PNS"
+            )
 
     recent_orders = recent_orders_query.order_by(models.Order.updated_at.desc()).limit(5).all()
 
