@@ -15,6 +15,7 @@ from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
 
 import models
+from models import get_ist_now
 import schemas
 import auth
 from schemas import ProductPMCodeUpdate
@@ -111,7 +112,7 @@ def login(user_credentials: schemas.UserLogin, db: Session = Depends(get_db)):
 
         t = perf_counter()
         print("3. Updating last_login")
-        user.last_login = datetime.utcnow()
+        user.last_login = get_ist_now()
         db.commit()
         print(f"Commit completed in {perf_counter()-t:.3f}s")
 
@@ -263,7 +264,7 @@ def update_product(
     for key, value in update_data.items():
         setattr(db_product, key, value)
 
-    db_product.updated_at = datetime.utcnow()
+    db_product.updated_at = get_ist_now()
     db.add(db_product)
     db.commit()
     db.refresh(db_product)
@@ -633,7 +634,7 @@ def create_pm_request(
     else:
         old_status = request.status
         request.status = "PENDING_ARTWORK"
-        request.updated_at = datetime.utcnow()
+        request.updated_at = get_ist_now()
         transaction = models.PMCodeTransaction(
             request_id=request.id,
             from_state=old_status,
@@ -670,7 +671,7 @@ def submit_artwork_pm_code(
     request.current_secondary_pm_code = data.secondary_pm_code
     request.current_leaf_pm_code = data.leaf_pm_code
     request.status = "AWAITING_REGULATORY_APPROVAL"
-    request.updated_at = datetime.utcnow()
+    request.updated_at = get_ist_now()
 
     transaction = models.PMCodeTransaction(
         request_id=request.id,
@@ -682,7 +683,7 @@ def submit_artwork_pm_code(
         secondary_pm_code=data.secondary_pm_code,
         leaf_pm_code=data.leaf_pm_code,
         remarks=data.remarks,
-        created_at=datetime.utcnow(),
+        created_at=get_ist_now(),
         response_time_days=0.0 # This will be calculated by regulatory later.
     )
     db.add(transaction)
@@ -711,7 +712,7 @@ def decide_pm_code(
         models.PMCodeTransaction.request_id == request.id
     ).order_by(models.PMCodeTransaction.created_at.desc()).first()
     
-    now = datetime.utcnow()
+    now = get_ist_now()
     response_time_days = 0.0
     if last_tx:
         time_diff = now - last_tx.created_at
@@ -1071,7 +1072,7 @@ def update_customer(
     for key, value in update_data.items():
         setattr(db_customer, key, value)
 
-    db_customer.updated_at = datetime.utcnow()
+    db_customer.updated_at = get_ist_now()
     db.add(db_customer)
     db.commit()
     db.refresh(db_customer)
@@ -2048,7 +2049,7 @@ def approve_order(
         approval_to_act_on.status = decision_str
         approval_to_act_on.remarks = f"{approval_data.remarks.strip() if approval_data.remarks else ''}"
         approval_to_act_on.approver_id = current_user.id
-        approval_to_act_on.approved_at = datetime.utcnow()
+        approval_to_act_on.approved_at = get_ist_now()
 
         log_audit(
             db, order_id, current_user.id,
@@ -2102,7 +2103,7 @@ def approve_order(
         approval.status = decision_str
         approval.remarks = f"[SCM Override] {approval_data.remarks.strip()}"
         approval.approver_id = current_user.id
-        approval.approved_at = datetime.utcnow()
+        approval.approved_at = get_ist_now()
 
         log_audit(
             db, order_id, current_user.id,
@@ -2192,7 +2193,7 @@ def approve_order(
     approval_to_act_on.status = decision_str
     approval_to_act_on.remarks = approval_data.remarks.strip() if approval_data.remarks else None
     approval_to_act_on.approver_id = current_user.id
-    approval_to_act_on.approved_at = datetime.utcnow()
+    approval_to_act_on.approved_at = get_ist_now()
 
     # Handle Regulatory specific actions
     if current_user.department == "Regulatory" and decision_str == models.ApprovalStatus.APPROVED.value:
@@ -2273,7 +2274,7 @@ def check_all_approvals(order: models.Order, db: Session, user_id: int, ip_addre
         else:
             # If no pending approvals and no rejections, then all are approved
             order.status = models.OrderStatus.ORDER_FINALIZED.value
-            order.accepted_at = datetime.utcnow()
+            order.accepted_at = get_ist_now()
 
     if prev_order_status != order.status:
         log_audit(db, order.id, user_id, "ORDER_STATUS_CHANGE", prev_order_status, order.status,
@@ -2326,7 +2327,7 @@ def update_milestone(
     if milestone_update.remarks:
         milestone.remarks = milestone_update.remarks
 
-    milestone.updated_at = datetime.utcnow()
+    milestone.updated_at = get_ist_now()
 
     # Check for delays
     if milestone.status == "COMPLETED" and milestone.target_date:
@@ -2462,7 +2463,7 @@ def update_milestone_by_id(
     if milestone_update.remarks is not None:
         milestone.remarks = milestone_update.remarks
 
-    milestone.updated_at = datetime.utcnow()
+    milestone.updated_at = get_ist_now()
 
     # Check for delays
     if milestone.status == "COMPLETED" and milestone.target_date:
@@ -2603,10 +2604,10 @@ def update_order_status_from_milestones(order: models.Order, db: Session, user_i
     
     if delivered:
         order.status = "DELIVERED"
-        order.delivered_at = datetime.utcnow()
+        order.delivered_at = get_ist_now()
     elif shipped:
         order.status = "SHIPPED"
-        order.shipped_at = datetime.utcnow()
+        order.shipped_at = get_ist_now()
     elif ready_for_shipment:
         order.status = "READY FOR SHIPMENT"
     elif order.status == "ORDER ACCEPTED":
@@ -2677,7 +2678,7 @@ def get_dashboard(
     # This part should be implemented based on your definition of "new orders"
     # For example, orders created in the last 24 hours.
     # For demonstration, let's assume 0 for now.
-    new_orders_count = db.query(models.Order).filter(models.Order.created_at >= (datetime.utcnow() - timedelta(days=1))).count()
+    new_orders_count = db.query(models.Order).filter(models.Order.created_at >= (get_ist_now() - timedelta(days=1))).count()
 
     # Get total pending approval orders (any status that indicates pending approval)
     pending_approval_count = db.query(models.Order).filter(

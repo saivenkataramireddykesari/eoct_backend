@@ -2,7 +2,13 @@ import enum
 from sqlalchemy import Column, Integer, String, Date, DateTime, Boolean, Text, ForeignKey, Float
 from sqlalchemy.orm import relationship
 from database import Base
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def get_ist_now():
+    return datetime.now(IST)
+
 
 class ApprovalStatus(enum.Enum):
     PENDING = "PENDING"
@@ -50,7 +56,7 @@ class User(Base):
     department = Column(String(50), nullable=False)  # Exports, Regulatory, SCM, Artwork, Finance, Management
     role = Column(String(50), nullable=False, default="user")  # user, manager, admin
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_ist_now)
     last_login = Column(DateTime)
     manufacturing_unit = Column(String(50), nullable=True) # For SCM users (PP, PNS, ALL)
     
@@ -78,8 +84,8 @@ class Product(Base):
     current_artwork_version = Column(String(20))
     artwork_status = Column(String(50), default="Not Available")  # Available, Pending, Not Available
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=get_ist_now)
+    updated_at = Column(DateTime, default=get_ist_now, onupdate=get_ist_now)
     
     orders = relationship("Order", back_populates="product")
     registrations = relationship("Registration", back_populates="product")
@@ -99,8 +105,8 @@ class Registration(Base):
     certificate_path = Column(String(500))
     remarks = Column(Text)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=get_ist_now)
+    updated_at = Column(DateTime, default=get_ist_now, onupdate=get_ist_now)
     
     product = relationship("Product", back_populates="registrations")
 
@@ -123,8 +129,8 @@ class Customer(Base):
     agreement_status = Column(String(50), default="Pending")  # Active, Expired, Pending
     agreement_validity = Column(Date)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=get_ist_now)
+    updated_at = Column(DateTime, default=get_ist_now, onupdate=get_ist_now)
     
     country = relationship("Country", back_populates="customers")
     orders = relationship("Order", back_populates="customer")
@@ -188,8 +194,8 @@ class Order(Base):
     tentative_release_date = Column(Date)
     
     # Tracking dates
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=get_ist_now)
+    updated_at = Column(DateTime, default=get_ist_now, onupdate=get_ist_now)
     accepted_at = Column(DateTime)
     shipped_at = Column(DateTime)
     delivered_at = Column(DateTime)
@@ -215,7 +221,7 @@ class OrderApproval(Base):
     remarks = Column(Text)
     approved_at = Column(DateTime)
     sequence = Column(Integer, nullable=False) # Will be set based on ApprovalDepartment
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_ist_now)
     
     order = relationship("Order", back_populates="approvals")
     approver = relationship("User", back_populates="approvals")
@@ -232,8 +238,8 @@ class Milestone(Base):
     target_date = Column(Date)
     actual_date = Column(Date)
     remarks = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=get_ist_now)
+    updated_at = Column(DateTime, default=get_ist_now, onupdate=get_ist_now)
     
     order = relationship("Order", back_populates="milestones")
 
@@ -247,7 +253,7 @@ class AuditLog(Base):
     previous_status = Column(String(50))
     new_status = Column(String(50))
     remarks = Column(Text)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=get_ist_now)
     ip_address = Column(String(50))
     
     order = relationship("Order", back_populates="audit_logs")
@@ -263,7 +269,7 @@ class Alert(Base):
     priority = Column(String(20), default="MEDIUM")  # LOW, MEDIUM, HIGH, CRITICAL
     department = Column(String(50))  # Target department
     is_read = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_ist_now)
     resolved_at = Column(DateTime)
     
     order = relationship("Order", back_populates="alerts")
@@ -279,8 +285,8 @@ class PMCodeRequest(Base):
     current_secondary_pm_code = Column(String(50))
     current_leaf_pm_code = Column(String(50))
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=get_ist_now)
+    updated_at = Column(DateTime, default=get_ist_now, onupdate=get_ist_now)
 
     product = relationship("Product", back_populates="pm_code_requests")
     transactions = relationship("PMCodeTransaction", back_populates="request", cascade="all, delete-orphan")
@@ -299,7 +305,7 @@ class PMCodeTransaction(Base):
     secondary_pm_code = Column(String(50))
     leaf_pm_code = Column(String(50))
     remarks = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_ist_now)
     response_time_days = Column(Float, default=0.0)
     
     request = relationship("PMCodeRequest", back_populates="transactions")
@@ -315,7 +321,7 @@ class MilestoneHistory(Base):
     new_value = Column(String(100))
     remarks = Column(Text, nullable=True)
     changed_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    changed_at = Column(DateTime, default=datetime.utcnow)
+    changed_at = Column(DateTime, default=get_ist_now)
     
     milestone = relationship("Milestone")
     changed_by_user = relationship("User", foreign_keys=[changed_by_user_id], back_populates="milestone_history_entries")
