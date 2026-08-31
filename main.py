@@ -15,7 +15,7 @@ from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
 
 import models
-from models import get_ist_now
+from models import get_ist_now, make_aware
 import schemas
 import auth
 from schemas import ProductPMCodeUpdate
@@ -568,7 +568,7 @@ def update_product_pm_code(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Allow Regulatory, Artwork, and Management departments to update PM code."""
+    """Allow Artwork to submit PM code for Regulatory approval. Only Regulatory/Management can directly approve."""
     if current_user.department not in ["Regulatory", "Management", "Artwork"]:
         raise HTTPException(
             status_code=403,
@@ -577,6 +577,48 @@ def update_product_pm_code(
     product = db.query(models.Product).filter(models.Product.sku_code == sku).first()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
+
+    if current_user.department == "Artwork":
+        # Artwork team updates must go through Regulatory approval
+        request = db.query(models.PMCodeRequest).filter(
+            models.PMCodeRequest.product_sku == sku
+        ).order_by(models.PMCodeRequest.created_at.desc()).first()
+
+        old_status = request.status if request else None
+
+        if not request or request.status == "APPROVED":
+            request = models.PMCodeRequest(
+                product_sku=sku,
+                status="AWAITING_REGULATORY_APPROVAL",
+                current_primary_pm_code=product_update.primary_pm_code or "",
+                current_secondary_pm_code=product_update.secondary_pm_code or "",
+                current_leaf_pm_code=product_update.leaf_pm_code or ""
+            )
+            db.add(request)
+            db.flush()
+        else:
+            request.current_primary_pm_code = product_update.primary_pm_code or ""
+            request.current_secondary_pm_code = product_update.secondary_pm_code or ""
+            request.current_leaf_pm_code = product_update.leaf_pm_code or ""
+            request.status = "AWAITING_REGULATORY_APPROVAL"
+            request.updated_at = get_ist_now()
+
+        transaction = models.PMCodeTransaction(
+            request_id=request.id,
+            from_state=old_status,
+            to_state="AWAITING_REGULATORY_APPROVAL",
+            action_by_dept="Artwork",
+            action_by_user_id=current_user.id,
+            primary_pm_code=product_update.primary_pm_code,
+            secondary_pm_code=product_update.secondary_pm_code,
+            leaf_pm_code=product_update.leaf_pm_code,
+            remarks="PM Code updated by Artwork team, submitted for Regulatory approval",
+            created_at=get_ist_now()
+        )
+        db.add(transaction)
+        db.commit()
+        db.refresh(product)
+        return product
     
     update_data = product_update.dict(exclude_unset=True)
     for key, value in update_data.items():
@@ -714,8 +756,9 @@ def decide_pm_code(
     
     now = get_ist_now()
     response_time_days = 0.0
-    if last_tx:
-        time_diff = now - last_tx.created_at
+    if last_tx and last_tx.created_at:
+        tx_created = make_aware(last_tx.created_at)
+        time_diff = now - tx_created
         response_time_days = round(time_diff.total_seconds() / 86400.0, 2)
     
     old_status = request.status
@@ -747,6 +790,14 @@ def decide_pm_code(
                 product.artwork_status = "Available"
 
             db.add(product)
+            db.flush()
+
+            affected_orders = db.query(models.Order).filter(models.Order.sku == product.sku_code).all()
+            for o in affected_orders:
+                c_res = run_compliance_check(o, db, product)
+                o.compliance_status = c_res["status"]
+                o.compliance_remarks = c_res["remarks"]
+                db.add(o)
     else:
         request.status = "PENDING_ARTWORK"
     
@@ -1110,7 +1161,14 @@ def run_compliance_check(order: models.Order, db: Session, product: Optional[mod
             issues.append(f"Registration expires before delivery date")
         
         # Check artwork
-        if not product or product.artwork_status != "Available":
+        is_artwork_available = False
+        if product:
+            status_str = (product.artwork_status or "").strip().lower()
+            has_pm_code = bool(product.primary_pm_code and str(product.primary_pm_code).strip())
+            if status_str == "available" or has_pm_code:
+                is_artwork_available = True
+        
+        if not is_artwork_available:
             issues.append(f"Artwork not available for SKU {order.sku}")
         
         # Check batch size
@@ -1813,6 +1871,14 @@ def get_order(
     ).filter(models.Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    if order.sku and order.product:
+        comp_res = run_compliance_check(order, db, order.product)
+        if order.compliance_status != comp_res["status"] or order.compliance_remarks != comp_res["remarks"]:
+            order.compliance_status = comp_res["status"]
+            order.compliance_remarks = comp_res["remarks"]
+            db.commit()
+            db.refresh(order)
 
     return order
 

@@ -9,6 +9,13 @@ IST = timezone(timedelta(hours=5, minutes=30))
 def get_ist_now():
     return datetime.now(IST)
 
+def make_aware(dt):
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=IST)
+    return dt
+
 
 class ApprovalStatus(enum.Enum):
     PENDING = "PENDING"
