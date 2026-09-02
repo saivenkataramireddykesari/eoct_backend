@@ -106,7 +106,7 @@ class ProductBase(BaseModel):
     secondary_pm_code: Optional[str] = None
     leaf_pm_code: Optional[str] = None
     current_artwork_version: Optional[str] = None
-    artwork_status: str = "Not Available"
+    artwork_status: Optional[str] = "Not Available"
 
 class RegistrationDetails(BaseModel):
     registration_number: str
