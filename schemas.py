@@ -213,6 +213,7 @@ class RegistrationResponse(RegistrationBase):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     country: Optional["Country"] = None
+    product: Optional["ProductResponse"] = None
 
     class Config:
         from_attributes = True
