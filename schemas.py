@@ -499,7 +499,20 @@ class MilestoneHistoryResponse(BaseModel):
         from_attributes = True
 
 
+
+class MaintenanceStatusResponse(BaseModel):
+    in_maintenance: bool
+    message: str
+    estimated_completion: Optional[str] = None
+    updated_at: Optional[str] = None
+
+class MaintenanceStatusUpdate(BaseModel):
+    in_maintenance: bool
+    message: Optional[str] = "We are currently conducting system maintenance. Normal operations will resume shortly."
+    estimated_completion: Optional[str] = "Estimated completion: 30 minutes"
+
 ProductResponse.model_rebuild(_types_namespace=globals())
 RegistrationResponse.model_rebuild(_types_namespace=globals())
 CustomerResponse.model_rebuild(_types_namespace=globals())
 OrderResponse.model_rebuild(_types_namespace=globals())
+

@@ -78,7 +78,102 @@ def get_milestones_debug(db: Session = Depends(get_db)):
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# System Maintenance State Handler (reads from .env dynamically and supports API override)
+from dotenv import load_dotenv
+
+RUNTIME_MAINTENANCE_OVERRIDE: Optional[bool] = None
+RUNTIME_MAINTENANCE_MESSAGE: Optional[str] = None
+RUNTIME_MAINTENANCE_ESTIMATED_END: Optional[str] = None
+
+def get_current_maintenance_state():
+    load_dotenv(override=True)
+    env_in_maintenance = os.getenv("MAINTENANCE_MODE", "false").strip().lower() in ("true", "1", "yes", "on", "active")
+    
+    in_maintenance = RUNTIME_MAINTENANCE_OVERRIDE if RUNTIME_MAINTENANCE_OVERRIDE is not None else env_in_maintenance
+    message = RUNTIME_MAINTENANCE_MESSAGE or os.getenv("MAINTENANCE_MESSAGE", "We are currently performing scheduled maintenance to upgrade system infrastructure and optimize performance. All data is secure and services will return shortly.")
+    estimated_completion = RUNTIME_MAINTENANCE_ESTIMATED_END or os.getenv("MAINTENANCE_ESTIMATED_END", "Approx. 30 - 45 mins")
+    
+    return {
+        "in_maintenance": in_maintenance,
+        "message": message,
+        "estimated_completion": estimated_completion,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+    }
+
+@app.middleware("http")
+async def check_maintenance_middleware(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    
+    path = request.url.path
+    state = get_current_maintenance_state()
+    if state["in_maintenance"]:
+        allowed_prefixes = [
+            "/api/system/maintenance",
+            "/api/auth/login",
+            "/docs",
+            "/openapi.json",
+            "/redoc"
+        ]
+        if not any(path.startswith(p) for p in allowed_prefixes):
+            auth_header = request.headers.get("Authorization")
+            is_admin = False
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header.split(" ")[1]
+                try:
+                    emp_id = auth.decode_token(token)
+                    if emp_id:
+                        db = SessionLocal()
+                        try:
+                            user = db.query(models.User).filter(models.User.employee_id == emp_id).first()
+                            if user and (user.role.lower() in ["admin", "administrator", "manager"] or user.department == "Exports"):
+                                is_admin = True
+                        finally:
+                            db.close()
+                except Exception:
+                    pass
+
+            if not is_admin:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": state["message"],
+                        "in_maintenance": True,
+                        "message": state["message"],
+                        "estimated_completion": state["estimated_completion"]
+                    }
+                )
+
+    return await call_next(request)
+
+# System Maintenance Endpoints
+@app.get("/api/system/maintenance", response_model=schemas.MaintenanceStatusResponse)
+def get_maintenance_status():
+    return get_current_maintenance_state()
+
+@app.post("/api/system/maintenance", response_model=schemas.MaintenanceStatusResponse)
+def update_maintenance_status(
+    status_update: schemas.MaintenanceStatusUpdate,
+    current_user: models.User = Depends(get_current_user)
+):
+    global RUNTIME_MAINTENANCE_OVERRIDE, RUNTIME_MAINTENANCE_MESSAGE, RUNTIME_MAINTENANCE_ESTIMATED_END
+    if current_user.role.lower() not in ["admin", "administrator", "manager"] and current_user.department != "Exports":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only administrators or authorized managers can toggle system maintenance mode"
+        )
+    
+    RUNTIME_MAINTENANCE_OVERRIDE = status_update.in_maintenance
+    if status_update.message:
+        RUNTIME_MAINTENANCE_MESSAGE = status_update.message
+    if status_update.estimated_completion:
+        RUNTIME_MAINTENANCE_ESTIMATED_END = status_update.estimated_completion
+    
+    return get_current_maintenance_state()
+
 security = HTTPBearer()
+
 
 # ==================== AUTHENTICATION ENDPOINTS ====================
 
