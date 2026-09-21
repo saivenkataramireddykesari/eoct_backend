@@ -2586,6 +2586,13 @@ def update_milestone_by_id(
     elif user_dept in ["Exports", "Exports Team"] and milestone.name in scm_allowed_milestones:
         raise HTTPException(status_code=403, detail="Exports department is not authorized to update SCM milestones.")
 
+    # SCM can only SET target dates for the first time — not update an already-set date
+    if user_dept == "SCM" and milestone_update.target_date is not None and milestone.target_date is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="SCM can only set a target date once. Updating an already-set target date is not allowed."
+        )
+
     # Mandatory remarks check when target date or status is modified
     if (milestone_update.target_date is not None and milestone.target_date != milestone_update.target_date) or (milestone_update.status and prev_status != milestone_update.status):
         if not milestone_update.remarks or not milestone_update.remarks.strip():
@@ -2654,8 +2661,8 @@ def set_bulk_target_dates(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    if current_user.department not in ("SCM", "Management"):
-        raise HTTPException(status_code=403, detail="Only SCM or Management can set milestone target dates")
+    if current_user.department not in ("SCM", "Management") and not current_user.department.startswith("Exports"):
+        raise HTTPException(status_code=403, detail="Only SCM, Exports, or Management can set milestone target dates")
 
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not order:
@@ -2714,6 +2721,12 @@ def set_bulk_target_dates(
 
         # Existing → update + write history
         old_date = milestone.target_date
+        if old_date is not None:
+            # SCM can only SET target dates for the first time — not update an already-set date
+            raise HTTPException(
+                status_code=403,
+                detail=f"Target date for '{milestone.name}' is already set and cannot be updated."
+            )
         if old_date != item.target_date:
             db.add(models.MilestoneHistory(
                 milestone_id=milestone.id,
