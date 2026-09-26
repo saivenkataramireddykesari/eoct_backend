@@ -284,7 +284,7 @@ def create_user(
 @app.get("/api/products", response_model=List[schemas.ProductResponse])
 def get_products(
     skip: int = 0,
-    limit: int = 20,
+    limit: int = 500,
     scm_user_type: Optional[str] = None, # New parameter for filtering
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
@@ -1436,7 +1436,7 @@ def get_orders(
 
     query = db.query(models.Order).options(
         joinedload(models.Order.customer),
-        joinedload(models.Order.product),
+        joinedload(models.Order.product).selectinload(models.Product.pm_code_requests).selectinload(models.PMCodeRequest.transactions),
         joinedload(models.Order.country),
 
         selectinload(
@@ -1958,7 +1958,7 @@ def get_order(
 
     order = db.query(models.Order).options(
         joinedload(models.Order.customer),
-        joinedload(models.Order.product),
+        joinedload(models.Order.product).selectinload(models.Product.pm_code_requests).selectinload(models.PMCodeRequest.transactions),
         joinedload(models.Order.country),
         selectinload(models.Order.approvals).joinedload(models.OrderApproval.approver),
         selectinload(models.Order.milestones),
