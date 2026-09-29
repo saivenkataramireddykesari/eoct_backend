@@ -2563,6 +2563,15 @@ def get_milestone_history(
         )
     return response_history
 
+def dates_differ(d1, d2) -> bool:
+    if d1 is None and d2 is None:
+        return False
+    if d1 is None or d2 is None:
+        return True
+    s1 = d1.strftime('%Y-%m-%d') if hasattr(d1, 'strftime') else str(d1)[:10]
+    s2 = d2.strftime('%Y-%m-%d') if hasattr(d2, 'strftime') else str(d2)[:10]
+    return s1 != s2
+
 @app.put("/api/milestones/{milestone_id}")
 def update_milestone_by_id(
     milestone_id: int,
@@ -2595,19 +2604,19 @@ def update_milestone_by_id(
         raise HTTPException(status_code=403, detail="Exports department is not authorized to update SCM milestones.")
 
     # SCM can only SET target dates for the first time — not update an already-set date
-    if user_dept == "SCM" and milestone_update.target_date is not None and milestone.target_date is not None and milestone_update.target_date != milestone.target_date:
+    if user_dept == "SCM" and milestone_update.target_date is not None and milestone.target_date is not None and dates_differ(milestone_update.target_date, milestone.target_date):
         raise HTTPException(
             status_code=403,
             detail="SCM can only set a target date once. Updating an already-set target date is not allowed."
         )
 
     # Mandatory remarks check when target date or status is modified
-    if (milestone_update.target_date is not None and milestone.target_date != milestone_update.target_date) or (milestone_update.status and prev_status != milestone_update.status):
+    if (milestone_update.target_date is not None and dates_differ(milestone_update.target_date, milestone.target_date)) or (milestone_update.status and prev_status != milestone_update.status):
         if not milestone_update.remarks or not milestone_update.remarks.strip():
             raise HTTPException(status_code=400, detail="Remarks are mandatory when updating milestone target date or status.")
 
     if milestone_update.target_date is not None:
-        if milestone.target_date != milestone_update.target_date:
+        if dates_differ(milestone.target_date, milestone_update.target_date):
             old_val = str(milestone.target_date.strftime('%Y-%m-%d')) if milestone.target_date else "Not Set"
             new_val = str(milestone_update.target_date.strftime('%Y-%m-%d')) if milestone_update.target_date else "Not Set"
             hist = models.MilestoneHistory(
@@ -2729,13 +2738,13 @@ def set_bulk_target_dates(
 
         # Existing → update + write history
         old_date = milestone.target_date
-        if old_date is not None and item.target_date is not None and item.target_date != old_date:
+        if old_date is not None and item.target_date is not None and dates_differ(item.target_date, old_date):
             # SCM can only SET target dates for the first time — not update an already-set date
             raise HTTPException(
                 status_code=403,
                 detail=f"Target date for '{milestone.name}' is already set and cannot be updated."
             )
-        if old_date != item.target_date:
+        if dates_differ(old_date, item.target_date):
             db.add(models.MilestoneHistory(
                 milestone_id=milestone.id,
                 change_type="TARGET_DATE_UPDATE",
