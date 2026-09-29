@@ -2591,11 +2591,11 @@ def update_milestone_by_id(
 
     if user_dept == "SCM" and milestone.name in exports_only_milestones:
         raise HTTPException(status_code=403, detail="SCM department is not authorized to update Ready for Shipment, Freight Booked, Shipped, or Delivered milestones.")
-    elif user_dept in ["Exports", "Exports Team"] and milestone.name in scm_allowed_milestones:
+    elif (user_dept.startswith("Exports") if user_dept else False) and milestone.name in scm_allowed_milestones:
         raise HTTPException(status_code=403, detail="Exports department is not authorized to update SCM milestones.")
 
     # SCM can only SET target dates for the first time — not update an already-set date
-    if user_dept == "SCM" and milestone_update.target_date is not None and milestone.target_date is not None:
+    if user_dept == "SCM" and milestone_update.target_date is not None and milestone.target_date is not None and milestone_update.target_date != milestone.target_date:
         raise HTTPException(
             status_code=403,
             detail="SCM can only set a target date once. Updating an already-set target date is not allowed."
@@ -2729,7 +2729,7 @@ def set_bulk_target_dates(
 
         # Existing → update + write history
         old_date = milestone.target_date
-        if old_date is not None:
+        if old_date is not None and item.target_date is not None and item.target_date != old_date:
             # SCM can only SET target dates for the first time — not update an already-set date
             raise HTTPException(
                 status_code=403,
