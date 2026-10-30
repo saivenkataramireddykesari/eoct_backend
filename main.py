@@ -292,7 +292,7 @@ def create_user(
 @app.get("/api/products", response_model=List[schemas.ProductResponse])
 def get_products(
     skip: int = 0,
-    limit: int = 500,
+    limit: Optional[int] = None,
     scm_user_type: Optional[str] = None, # New parameter for filtering
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
@@ -302,8 +302,11 @@ def get_products(
         joinedload(models.Product.country)
     )
 
-
-    products = query.offset(skip).limit(limit).all()
+    if skip:
+        query = query.offset(skip)
+    if limit is not None:
+        query = query.limit(limit)
+    products = query.all()
     return products
 
 
@@ -973,7 +976,7 @@ def create_registration(
 @app.get("/api/registrations", response_model=List[schemas.RegistrationResponse])
 def get_registrations(
     skip: int = 0,
-    limit: int = 20,
+    limit: Optional[int] = None,
     country_id: Optional[int] = None,
     sku: Optional[str] = None,
     db: Session = Depends(get_db),
@@ -984,7 +987,11 @@ def get_registrations(
         query = query.filter(models.Registration.country_id == country_id)
     if sku:
         query = query.filter(models.Registration.sku == sku)
-    registrations = query.offset(skip).limit(limit).all()
+    if skip:
+        query = query.offset(skip)
+    if limit is not None:
+        query = query.limit(limit)
+    registrations = query.all()
     return registrations
 
 @app.put("/api/registrations/{registration_id}", response_model=schemas.RegistrationResponse)
@@ -1116,8 +1123,9 @@ def upload_registration_certificate(
 @app.get("/api/customers", response_model=List[schemas.CustomerResponse])
 def get_customers(
     skip: int = 0,
-    limit: int = 20,
+    limit: Optional[int] = None,
     country_id: Optional[int] = None,
+    country: Optional[str] = None,
     product_sku: Optional[str] = None,
     product_name: Optional[str] = None,
 
@@ -1129,20 +1137,14 @@ def get_customers(
     if country_id:
         query = query.filter(models.Customer.country_id == country_id)
 
-    if product_sku or product_name:
+    if country:
+        query = query.join(models.Customer.country).filter(models.Country.name == country)
 
-        # If a country_id is provided, filter products by that country as well
-        if country_id:
-            subquery = subquery.join(models.Customer, models.Product.customer == models.Customer.customer_name)
-            subquery = subquery.filter(models.Customer.country_id == country_id)
-
-        matching_customer_names = [c[0] for c in subquery.all()]
-        if matching_customer_names:
-            query = query.filter(models.Customer.customer_name.in_(matching_customer_names))
-        else:
-            return [] # No products match, so no customers to return
-
-    customers = query.offset(skip).limit(limit).all()
+    if skip:
+        query = query.offset(skip)
+    if limit is not None:
+        query = query.limit(limit)
+    customers = query.all()
     return customers
 
 @app.get("/api/debug/customers", response_model=List[schemas.CustomerResponse])
@@ -1395,7 +1397,7 @@ def get_user_approval_department(
 @app.get("/api/orders", response_model=List[schemas.OrderResponse])
 def get_orders(
     skip: int = 0,
-    limit: int = 20,
+    limit: Optional[int] = None,
     status: Optional[str] = None,
     product_type: Optional[str] = None,
     db: Session = Depends(get_db),
@@ -1624,15 +1626,17 @@ def get_orders(
     )
     logging.debug("=" * 70)
 
-    orders = (
+    orders_query = (
         query
         .order_by(
             models.Order.created_at.desc()
         )
-        .offset(skip)
-        .limit(limit)
-        .all()
     )
+    if skip:
+        orders_query = orders_query.offset(skip)
+    if limit is not None:
+        orders_query = orders_query.limit(limit)
+    orders = orders_query.all()
 
     # ============================================================
     # DEBUG RESULTS
@@ -2847,14 +2851,19 @@ def mark_alert_read(
 def get_audit_logs(
     order_id: Optional[int] = None,
     skip: int = 0,
-    limit: int = 20,
+    limit: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
     query = db.query(models.AuditLog).options(joinedload(models.AuditLog.user))
     if order_id:
         query = query.filter(models.AuditLog.order_id == order_id)
-    logs = query.order_by(models.AuditLog.timestamp.desc()).offset(skip).limit(limit).all()
+    query = query.order_by(models.AuditLog.timestamp.desc())
+    if skip:
+        query = query.offset(skip)
+    if limit is not None:
+        query = query.limit(limit)
+    logs = query.all()
     return logs
 
 
