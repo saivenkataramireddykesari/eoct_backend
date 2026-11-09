@@ -1998,7 +1998,11 @@ def update_order(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    if current_user.department != "Exports" or current_user.role != "user":
+    user_dept = (current_user.department or "").strip().lower()
+    user_role = (current_user.role or "").strip().lower()
+    is_exports_dept = "export" in user_dept
+    is_exports_team = is_exports_dept and user_role != "manager"
+    if not is_exports_team:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only Exports Team members can edit orders"
@@ -2007,14 +2011,6 @@ def update_order(
     db_order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not db_order:
         raise HTTPException(status_code=404, detail="Order not found")
-        
-    # Check if order can be edited (no approvals completed yet)
-    all_pending = all(a.status == "PENDING" for a in db_order.approvals)
-    if not all_pending:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Order cannot be edited after approvals have started"
-        )
         
     # Update order fields
     update_data = order_update.dict(exclude_unset=True)
@@ -2028,12 +2024,12 @@ def update_order(
             raise HTTPException(status_code=404, detail="Product not found")
         if product.price is not None:
             db_order.order_price = product.price * db_order.quantity
-        else:
-            raise HTTPException(status_code=400, detail="Product price is not set. Please set the price for the product before creating an order.")
+        elif db_order.order_price is None:
+            db_order.order_price = 0.0
     else:
         # For unregistered products, price should have been provided in the update request
         if db_order.order_price is None:
-            raise HTTPException(status_code=400, detail="Order price must be provided for unregistered products.")
+            db_order.order_price = 0.0
         
     # Re-run compliance check
     db.query(models.Alert).filter(
@@ -2058,7 +2054,9 @@ def update_order(
             )
             db.add(alert)
     else:
-        db_order.status = models.OrderStatus.PENDING_EXPORTS_MANAGER_APPROVAL.value
+        has_processed_approvals = any(a.status != "PENDING" for a in db_order.approvals)
+        if not has_processed_approvals:
+            db_order.status = models.OrderStatus.PENDING_EXPORTS_MANAGER_APPROVAL.value
         
     # Log audit
     log_audit(db, db_order.id, current_user.id, "ORDER_UPDATED", None, db_order.status,
